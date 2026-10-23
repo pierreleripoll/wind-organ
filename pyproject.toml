@@ -1,0 +1,21 @@
+[project]
+name = "wind-organ"
+version = "0.1.0"
+description = "Real-time wind and pipe-organ synth engine: pink noise, gusts, an organ drone the wind blows through."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=2.0",
+    "scipy>=1.13",
+]
+
+[project.optional-dependencies]
+play = ["sounddevice>=0.5"]  # only for the CLI / live audio; the engine itself doesn't need it
+
+[project.scripts]
+wind-organ = "wind_organ.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
