@@ -657,6 +657,7 @@ class WindOrgan:
         spread = max(0.0, min(1.0, p.organ_spread))
         drift_alpha = 1.0 - math.exp(-(frames / sr) / RANK_DRIFT_TAU)
         n = np.arange(frames, dtype=np.float64)
+        glide = n * (n - 1.0) / (2.0 * frames)   # sum of the ramp n/frames up to n
         out = np.zeros((frames, 2), dtype=np.float64)
         for r, pipe in list(self.pipes.items()):
             target = 1.0 if r in self.chord else 0.0
@@ -693,11 +694,17 @@ class WindOrgan:
 
             # One fundamental phase per rank, carried across blocks; harmonic k is
             # exactly k * phase, so the partials stay phase-locked at block joins.
+            # The frequency glides from the last block's to this one's: the phase
+            # is the running sum of a linear ramp of the step.
             inc = 2.0 * math.pi * (f + offs) / sr                     # (ranks,)
-            ph = pipe.phase[:, None] + inc[:, None] * n[None, :]      # (ranks, frames)
+            inc0 = inc if pipe.inc is None or len(pipe.inc) != ranks else pipe.inc
+            pipe.inc = inc
+            dinc = (inc - inc0)[:, None]
+            ph = pipe.phase[:, None] + inc0[:, None] * n[None, :] + dinc * glide[None, :]
             arg = mults[:, None, None] * ph[None]
             wave = np.einsum("kn,krn->rn", a, np.sin(arg))
-            pipe.phase = np.fmod(pipe.phase + inc * frames, 2.0 * math.pi)
+            pipe.phase = np.fmod(pipe.phase + inc0 * frames + (inc - inc0) * (frames - 1) / 2.0,
+                                 2.0 * math.pi)
 
             # Pan: the pipe sits at its own place and its ranks spread around it,
             # so the beat moves between the speakers. Equal power, centre = 1 / 1.
@@ -779,6 +786,7 @@ class _Pipe:
         self.phase = np.zeros(1)
         self.lr_shift = rng.uniform(-0.5 * math.pi, 0.5 * math.pi, 1)
         self.amps = None   # partial levels of the last block (all ORGAN_MULTS)
+        self.inc = None    # phase step per sample of each rank, last block
         # organ_organic state (see _pipe_speech). p_off is drawn on first use,
         # from another generator, so this rng's draws stay the same.
         self.p_off = None
