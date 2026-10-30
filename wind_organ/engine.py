@@ -188,6 +188,7 @@ class WindOrgan:
         self.trem_phase = 0.0
         self.organ_waver_state = 0.0
         self.organ_swell = 0.0  # slow envelope built by sustained strong wind
+        self.organ_amp_prev = None  # organ level at the end of the last block
         self.organ_air_zi = [np.zeros((2, 2)) for _ in range(3)]  # air bands (f0, 2f0, 3f0)
 
         # The subsonic cutoff is a knob, so its SOS is rebuilt only when it changes;
@@ -531,8 +532,13 @@ class WindOrgan:
                     band, self.organ_air_zi[j] = lfilter(ab, aa, src, axis=0, zi=self.organ_air_zi[j])
                     air = air + band * w
 
+        # The level moves once per block (swell, gust, tremulant): ramp it across
+        # the block, so the 5.5 Hz tremulant is a curve, not ~17 steps.
+        amp_prev = organ_amp_eff if self.organ_amp_prev is None else self.organ_amp_prev
+        self.organ_amp_prev = organ_amp_eff
+        ramp = np.linspace(amp_prev, organ_amp_eff, frames)[:, None]
         # The tone is centred unless organ_spread; the breath is the stereo noise.
-        return (tone * ORGAN_GAIN + air * AIR_BOOST * p.organ_air) * organ_amp_eff
+        return (tone * ORGAN_GAIN + air * AIR_BOOST * p.organ_air) * ramp
 
     @staticmethod
     def _root(f: float, p: Params) -> float:
@@ -620,16 +626,22 @@ class WindOrgan:
                 offs = np.zeros(1)
             keep = ((ORGAN_MULTS * f) < (sr * 0.45)) & (amps > 0.0)
             keep[0] = True  # the fundamental always plays
-            mults, a = ORGAN_MULTS[keep], amps[keep]
+            a_now = amps
             if p.organ_tone_hz > 0.0:
-                a = a / (1.0 + (mults * f / p.organ_tone_hz) ** 2)
+                a_now = a_now / (1.0 + (ORGAN_MULTS * f / p.organ_tone_hz) ** 2)
+            # The partial levels move per block (the brightness follows the gusts):
+            # ramp each one across the block.
+            a_prev = a_now if pipe.amps is None else pipe.amps
+            pipe.amps = a_now
+            mults = ORGAN_MULTS[keep]
+            a = np.linspace(a_prev[keep], a_now[keep], frames, axis=1)   # (partials, frames)
 
             # One fundamental phase per rank, carried across blocks; harmonic k is
             # exactly k * phase, so the partials stay phase-locked at block joins.
             inc = 2.0 * math.pi * (f + offs) / sr                     # (ranks,)
             ph = pipe.phase[:, None] + inc[:, None] * n[None, :]      # (ranks, frames)
             arg = mults[:, None, None] * ph[None]
-            wave = np.einsum("k,krn->rn", a, np.sin(arg))
+            wave = np.einsum("kn,krn->rn", a, np.sin(arg))
             pipe.phase = np.fmod(pipe.phase + inc * frames, 2.0 * math.pi)
 
             # Pan: the pipe sits at its own place and its ranks spread around it,
@@ -643,7 +655,7 @@ class WindOrgan:
             # one too (at most +-90 degrees: mono loses 3 dB at worst, no notch).
             if spread > 0.0:
                 shift = spread * pipe.lr_shift
-                quad = np.einsum("k,krn->rn", a, np.cos(arg))
+                quad = np.einsum("kn,krn->rn", a, np.cos(arg))
                 wave_r = np.cos(shift)[:, None] * wave + np.sin(shift)[:, None] * quad
             else:
                 wave_r = wave
@@ -711,6 +723,7 @@ class _Pipe:
         self.rng = rng
         self.phase = np.zeros(1)
         self.lr_shift = rng.uniform(-0.5 * math.pi, 0.5 * math.pi, 1)
+        self.amps = None   # partial levels of the last block (all ORGAN_MULTS)
 
     def set_ranks(self, ranks: int) -> None:
         """Keep the ranks that stay; new ranks start at a random phase."""
