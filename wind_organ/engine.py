@@ -106,6 +106,23 @@ RANK_JITTER = 0.4          # +-40% per-pipe change of organ_beat_hz
 RANK_DRIFT = 0.5           # +-50% slow drift of the detune
 RANK_DRIFT_TAU = 4.0       # correlation time of that drift (s)
 GOLDEN = 0.6180339887      # spreads pipe pan positions evenly, in order of birth
+# organ_organic: from a clean synth organ (0) to wind finding a pipe by accident
+# (1). Every value below is scaled by organ_organic, so 0 is the clean organ.
+# The "pressure" is the organ swell x the gust (about 0..1.3): it decides how
+# each pipe speaks. Below SPEAK_LO the pipe only breathes: the fundamental is
+# gone, the octave and the twelfth flicker. It speaks fully at SPEAK_LO +
+# SPEAK_W. Above OVERBLOW_AT it overblows: the fundamental drops, the octave
+# takes over.
+SPEAK_LO, SPEAK_W = 0.15, 0.35
+OVERBLOW_AT, OVERBLOW_W = 1.0, 0.3
+HESITATE_OCT = 1.2         # extra octave (x2) while the pipe hesitates
+HESITATE_TWELFTH = 0.8     # extra twelfth (x3) while the pipe hesitates
+OVERBLOW_DROP = 0.85       # fundamental lost when the pipe overblows
+OVERBLOW_OCT = 2.0         # extra octave when the pipe overblows
+ORGANIC_PIPE_SPREAD = 0.15 # each pipe speaks at its own pressure, +- this
+ORGANIC_FLICKER = 0.35     # each partial's own slow random level, +-35%
+ORGANIC_FLICKER_TAU = 0.4  # (s)
+AIR_HESITATE = 2.0         # more breath while the pipes hesitate
 # Wind chord: the wind noise rings at the chord notes. A narrow bandpass on noise
 # has a low RMS, so it gets a boost that grows with Q (bandwidth ~ f / Q).
 WIND_CHORD_BOOST = 1.6
@@ -122,6 +139,12 @@ def pitch_to_freq(x: float) -> float:
     """Map a 0..1 pitch position onto FREQ_LO..FREQ_HI (log)."""
     x = max(0.0, min(1.0, x))
     return FREQ_LO * (FREQ_HI / FREQ_LO) ** x
+
+
+def _smooth01(x: float) -> float:
+    """Smoothstep of x clipped to 0..1: 0 below 0, 1 above 1, a soft S between."""
+    x = max(0.0, min(1.0, x))
+    return x * x * (3.0 - 2.0 * x)
 
 
 def build_biquad_bandpass(fc: float, Q: float, sr: int):
@@ -189,6 +212,7 @@ class WindOrgan:
         self.organ_waver_state = 0.0
         self.organ_swell = 0.0  # slow envelope built by sustained strong wind
         self.organ_amp_prev = None  # organ level at the end of the last block
+        self.organic_rng = np.random.default_rng(None if seed is None else seed + 32452843)
         self.organ_air_zi = [np.zeros((2, 2)) for _ in range(3)]  # air bands (f0, 2f0, 3f0)
 
         # The subsonic cutoff is a knob, so its SOS is rebuilt only when it changes;
@@ -517,7 +541,10 @@ class WindOrgan:
         # overall level holds as it moves.
         amps[ORGAN_MULTS >= 2.0] *= (1.0 - BRIGHT_TAPER) + BRIGHT_TAPER * bright
         amps /= max(amps.sum(), 1e-9)
-        tone = self._pipes(frames, f0, amps, p)
+        # How hard the air pushes into the pipes right now (see SPEAK_LO).
+        organic = max(0.0, min(1.0, p.organ_organic))
+        pressure = self.organ_swell * (1.0 + p.organ_wind * gust_dev)
+        tone = self._pipes(frames, f0, amps, p, pressure, organic)
 
         # "Air in the metal tube": noise resonating at the first harmonics, so the
         # breath is pitched (whistling through the pipe), not broadband hiss.
@@ -538,6 +565,8 @@ class WindOrgan:
         self.organ_amp_prev = organ_amp_eff
         ramp = np.linspace(amp_prev, organ_amp_eff, frames)[:, None]
         # The tone is centred unless organ_spread; the breath is the stereo noise.
+        if organic > 0.0 and p.organ_air > 0.0:
+            air = air * (1.0 + organic * AIR_HESITATE * (1.0 - _smooth01((pressure - SPEAK_LO) / SPEAK_W)))
         return (tone * ORGAN_GAIN + air * AIR_BOOST * p.organ_air) * ramp
 
     @staticmethod
@@ -588,7 +617,29 @@ class WindOrgan:
             out += y * (g * g * (3.0 - 2.0 * g))[:, None]
         return out * (boost * gain * p.wind_chord)
 
-    def _pipes(self, frames: int, f0: float, amps: np.ndarray, p: Params) -> np.ndarray:
+    def _pipe_speech(self, pipe: "_Pipe", pressure: float, organic: float,
+                     frames: int) -> np.ndarray:
+        """Weights for the partials of one pipe (all ORGAN_MULTS): how it speaks
+        at this pressure, and the slow flicker of each partial. Real pipes in
+        moving air are never as steady as sines."""
+        if pipe.p_off is None:
+            pipe.p_off = self.organic_rng.uniform(-1.0, 1.0) * ORGANIC_PIPE_SPREAD
+        pp = pressure + pipe.p_off * organic
+        speak = _smooth01((pp - SPEAK_LO) / SPEAK_W)
+        over = _smooth01((pp - OVERBLOW_AT) / OVERBLOW_W)
+        w = np.ones(len(ORGAN_MULTS))
+        w[0] = max(0.0, 1.0 - organic * (1.0 - speak) - organic * OVERBLOW_DROP * over)
+        w[1] = 1.0 + organic * (HESITATE_OCT * (1.0 - speak) + OVERBLOW_OCT * over)
+        w[2] = 1.0 + organic * HESITATE_TWELFTH * (1.0 - speak)
+        # The flicker is deeper while the pipe is unstable (hesitating, overblowing).
+        depth = min(0.9, organic * ORGANIC_FLICKER * (1.0 + (1.0 - speak) + over))
+        alpha = 1.0 - math.exp(-(frames / self.sr) / ORGANIC_FLICKER_TAU)
+        pipe.flicker = (1.0 - alpha) * pipe.flicker + alpha * self.organic_rng.standard_normal(len(w))
+        norm = math.sqrt((2.0 - alpha) / alpha)
+        return w * (1.0 + depth * np.tanh(pipe.flicker * (norm * 0.7)))
+
+    def _pipes(self, frames: int, f0: float, amps: np.ndarray, p: Params,
+               pressure: float = 1.0, organic: float = 0.0) -> np.ndarray:
         """All the pipes of the chord, each as organ_ranks detuned copies, panned.
         A pipe fades in or out over organ_fade_s when the chord changes. Returns
         (frames, 2). One pipe, one rank, no spread = the classic mono drone."""
@@ -632,6 +683,10 @@ class WindOrgan:
             # The partial levels move per block (the brightness follows the gusts):
             # ramp each one across the block.
             a_prev = a_now if pipe.amps is None else pipe.amps
+            if organic > 0.0:
+                # The pipe's valve opens with its fade: a new chord pipe hesitates
+                # before it speaks.
+                a_now = a_now * self._pipe_speech(pipe, pressure * _smooth01(g1), organic, frames)
             pipe.amps = a_now
             mults = ORGAN_MULTS[keep]
             a = np.linspace(a_prev[keep], a_now[keep], frames, axis=1)   # (partials, frames)
@@ -724,6 +779,10 @@ class _Pipe:
         self.phase = np.zeros(1)
         self.lr_shift = rng.uniform(-0.5 * math.pi, 0.5 * math.pi, 1)
         self.amps = None   # partial levels of the last block (all ORGAN_MULTS)
+        # organ_organic state (see _pipe_speech). p_off is drawn on first use,
+        # from another generator, so this rng's draws stay the same.
+        self.p_off = None
+        self.flicker = np.zeros(len(ORGAN_MULTS))
 
     def set_ranks(self, ranks: int) -> None:
         """Keep the ranks that stay; new ranks start at a random phase."""

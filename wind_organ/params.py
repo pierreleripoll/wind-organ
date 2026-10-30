@@ -127,6 +127,11 @@ class Params:
     # wind (see organ_threshold). 0 = a steady drone: the wind only colours it
     # (gusts still swell, brighten and sharpen it through organ_wind).
     organ_follow: float = 1.0
+    # From a clean synth organ (0) to the wind finding a pipe by accident, in a
+    # cave or a ruin (1). The partials flicker, and the air pressure (swell x
+    # gust) decides how each pipe speaks: it hesitates on the octave when the
+    # air is weak, it overblows in strong gusts.
+    organ_organic: float = 0.0
 
     # --- room and output ---
     reverb_mix: float = 0.25       # 0 = dry (reverb off, no CPU)
