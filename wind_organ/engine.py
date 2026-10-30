@@ -581,6 +581,8 @@ class WindOrgan:
         # The tone is centred unless organ_spread; the breath is the stereo noise.
         if organic > 0.0 and p.organ_air > 0.0:
             air = air * (1.0 + organic * AIR_HESITATE * (1.0 - _smooth01((pressure - SPEAK_LO) / SPEAK_W)))
+            # The tubes breathe by themselves: this breath fades out with the sines.
+            air = air * math.cos(organic * math.pi / 2.0)
         return (tone * ORGAN_GAIN + air * AIR_BOOST * p.organ_air) * ramp
 
     @staticmethod
