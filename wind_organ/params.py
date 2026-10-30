@@ -43,6 +43,10 @@ class Params:
     # A gust brightens the wind: the mid and high bands follow it more than the
     # low rumble (faster air = more hiss). 0 = all bands follow the gust the same.
     gust_bright: float = 0.0
+    # Buffet: the fast flutter of real wind on the level (the flapping you hear
+    # in a recording). Noise at about buffet_hz, deeper in a storm. 0 = off.
+    buffet_depth: float = 0.0
+    buffet_hz: float = 12.0
     q_drift_depth: float = 0.15    # slow random wobble on the band resonance
     q_drift_tau_s: float = 2.0
 

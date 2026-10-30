@@ -61,6 +61,7 @@ STORM_SOFT_BODY = 0.25      # very soft -> up to +25% low-band body (rounded)
 # high band by gust^3 (at gust_bright 1), so a +30% gust is ~+3.4 dB / +6.8 dB.
 GUST_BRIGHT_MID = 1.5
 GUST_BRIGHT_HIGH = 3.0
+STORM_BUFFET = 1.0          # loud -> up to +100% buffet depth
 
 # Pipe organ "principal chorus": harmonic multiples of the root and their raw
 # levels (8' 4' 2-2/3' 2' 1-3/5' 1-1/3' 1'). The 7th harmonic is off by default
@@ -141,6 +142,12 @@ class WindOrgan:
         self.high_zi = np.zeros((2, 2))
         self.gust_state = 0.0
         self.amp_prev = None  # wind level at the end of the last block
+        # The new wind layers (buffet, ...) draw from their own generator, so
+        # the random stream of the older layers stays the same when they are off.
+        self.wind_rng = np.random.default_rng(None if seed is None else seed + 104729)
+        self.buffet_hz = 0.0  # cutoff of the filter below (0 = not built yet)
+        self.buffet_b = self.buffet_a = self.buffet_norm = None
+        self.buffet_zi = np.zeros((2, 2))
         self.gust_extra_states = [0.0, 0.0, 0.0]  # fractal layers (tau/2, /4, /8)
         self.q_drift_state = 0.0
 
@@ -245,6 +252,8 @@ class WindOrgan:
         amp_prev = amp_target if self.amp_prev is None else self.amp_prev
         self.amp_prev = amp_target
         amp_eff = np.linspace(amp_prev, amp_target, frames)[:, None]   # (frames, 1)
+        if p.buffet_depth > 0.0:
+            amp_eff = amp_eff * self._buffet(frames, m, p)               # (frames, 2)
 
         # gust_bright: faster air makes more high-frequency noise, so the mid and
         # high bands follow a gust more than the low rumble does.
@@ -347,6 +356,28 @@ class WindOrgan:
         for k in keys:
             mix = mix + comp[k]
         return np.tanh(mix * drive_eff)
+
+    def _buffet(self, frames: int, m: float, p: Params) -> np.ndarray:
+        """The fast flutter of real wind on the level: noise lowpassed at
+        buffet_hz, one value per sample, around 1. Left and right are correlated
+        like the wind noise (stereo_width). Deeper in a storm. Returns (frames, 2)."""
+        sr = self.sr
+        fc = max(0.5, min(200.0, p.buffet_hz))
+        if fc != self.buffet_hz:
+            self.buffet_b, self.buffet_a = butter(2, fc / (sr / 2.0))
+            # Scale to unit variance on white noise: divide by the RMS of the
+            # impulse response (its tail is gone after ~20 periods of fc).
+            imp = np.zeros(int(20.0 * sr / fc))
+            imp[0] = 1.0
+            h = lfilter(self.buffet_b, self.buffet_a, imp)
+            self.buffet_norm = 1.0 / math.sqrt(float(np.sum(h * h)))
+            self.buffet_hz = fc
+        rho = 1.0 - max(0.0, min(1.0, p.stereo_width))
+        w = self.wind_rng.standard_normal((frames, 2))
+        w[:, 1] = rho * w[:, 0] + math.sqrt(max(0.0, 1.0 - rho * rho)) * w[:, 1]
+        y, self.buffet_zi = lfilter(self.buffet_b, self.buffet_a, w, axis=0, zi=self.buffet_zi)
+        depth = min(0.9, p.buffet_depth * (1.0 + STORM_BUFFET * m))
+        return 1.0 + depth * np.tanh(y * (self.buffet_norm * 0.7))
 
     def _organ(self, frames: int, f: float, amp: float, gust_mod: float,
                src: np.ndarray, p: Params) -> np.ndarray:
