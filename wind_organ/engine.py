@@ -57,6 +57,10 @@ STORM_DRIVE = 1.5           # loud -> up to +150% drive (grit)
 STORM_MIDQ = 1.0            # loud -> up to +100% on the mid-Q ramp (whistlier)
 STORM_SOFT_DARK = 0.6       # very soft -> mid + high bands down up to 60% (muffled)
 STORM_SOFT_BODY = 0.25      # very soft -> up to +25% low-band body (rounded)
+# gust_bright: on top of the level, a gust raises the mid band by gust^1.5 and the
+# high band by gust^3 (at gust_bright 1), so a +30% gust is ~+3.4 dB / +6.8 dB.
+GUST_BRIGHT_MID = 1.5
+GUST_BRIGHT_HIGH = 3.0
 
 # Pipe organ "principal chorus": harmonic multiples of the root and their raw
 # levels (8' 4' 2-2/3' 2' 1-3/5' 1-1/3' 1'). The 7th harmonic is off by default
@@ -242,6 +246,12 @@ class WindOrgan:
         self.amp_prev = amp_target
         amp_eff = np.linspace(amp_prev, amp_target, frames)[:, None]   # (frames, 1)
 
+        # gust_bright: faster air makes more high-frequency noise, so the mid and
+        # high bands follow a gust more than the low rumble does.
+        bright_up = 1.0
+        if p.gust_bright > 0.0 and p.use_gust:
+            bright_up = max(0.05, gust_mod) ** p.gust_bright
+
         if p.q_drift_depth > 0.0:
             q_alpha = 1.0 - math.exp(-(frames / sr) / max(p.q_drift_tau_s, 0.05))
             self.q_drift_state, q_mod = self._lfo_step(self.q_drift_state, q_alpha, p.q_drift_depth)
@@ -282,6 +292,9 @@ class WindOrgan:
             g_low = ((1.0 - tilt) * 0.6 + 0.3) * (1.0 + STORM_SOFT_BODY * soft)
             g_mid = 0.7 * g_dark
             g_high = (tilt ** 3) * p.high_band_gain * (1.0 + STORM_HIGH * m) * g_dark
+            if bright_up != 1.0:
+                g_mid *= bright_up ** GUST_BRIGHT_MID
+                g_high *= bright_up ** GUST_BRIGHT_HIGH
 
             comp["low"] = low * g_low * 4.0 * amp_eff
             comp["mid"] = mid * g_mid * 1.5 * amp_eff
@@ -293,6 +306,8 @@ class WindOrgan:
             rumble, self.rumble_zi = lfilter(self.rumble_b, self.rumble_a, src, axis=0,
                                              zi=self.rumble_zi)
             # Single-band isn't split into bands; expose it as "low" so solo still finds it.
+            if bright_up != 1.0:
+                bp = bp * bright_up ** GUST_BRIGHT_MID
             comp["low"] = (bp * 1.5 * 0.75 + rumble * 4.0 * 0.55) * amp_eff
 
         # Bourdon: narrow bandpass on the same noise at root + optional 5th/3rd.

@@ -40,6 +40,9 @@ class Params:
     # Strouhal coupling: a gust lifts the mid + high band centers, so the whistle
     # rises as the gust swells. 0 = fixed bands.
     eolian_depth: float = 0.0
+    # A gust brightens the wind: the mid and high bands follow it more than the
+    # low rumble (faster air = more hiss). 0 = all bands follow the gust the same.
+    gust_bright: float = 0.0
     q_drift_depth: float = 0.15    # slow random wobble on the band resonance
     q_drift_tau_s: float = 2.0
 
