@@ -61,6 +61,15 @@ class Params:
     # filtering). 0 = dual mono, 1 = fully wide. The organ tone stays centred.
     stereo_width: float = 0.6
 
+    # --- edge whistles: the wind on wires, cracks and edges ---
+    # Each whistle has its own pitch and threshold speed. It sings only above it,
+    # and higher when the wind blows harder (whistle_track: 0 = fixed pitch,
+    # 1 = pitch follows the speed). 0 whistles = off.
+    whistles: int = 0
+    whistle_level: float = 0.5
+    whistle_q: float = 30.0        # higher = purer whistle, lower = airy
+    whistle_track: float = 0.5
+
     # --- bourdon: narrow bandpass whistles on the same noise, at the pitch ---
     tone_level: float = 0.0        # 0 = off
     bourdon_q: float = 12.0        # higher = more pitched, lower = more airy
@@ -129,7 +138,8 @@ class Params:
     # can't hear but that shakes the woofer. The wind body sits at ~110 Hz.
     subsonic_hp_hz: float = 30.0
 
-    # Play only these layers: "low", "mid", "high", "bourdon", "chord", "organ".
+    # Play only these layers: "low", "mid", "high", "bourdon", "chord", "whistle",
+    # "organ".
     # Empty = all of them. Replace the set, don't mutate it (the engine may be
     # reading it from the audio thread).
     solo: frozenset = field(default_factory=frozenset)

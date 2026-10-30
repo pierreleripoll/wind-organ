@@ -64,6 +64,19 @@ GUST_BRIGHT_HIGH = 3.0
 STORM_BUFFET = 1.0          # loud -> up to +100% buffet depth
 GUST_SWEEP_MAX_S = 2.0      # longest gust_sweep_s
 GUST_SWEEP_DIR_TAU = 10.0   # correlation time of the wind direction (s)
+# Edge whistles. Each one gets, at birth: a base pitch, a threshold wind speed
+# (level x gust, the same 0..1 scale as the level) and the speed range over
+# which it fades in.
+WHISTLE_MAX = 8
+WHISTLE_F_LO, WHISTLE_F_HI = 500.0, 2800.0
+WHISTLE_THRESHOLD = (0.3, 0.75)
+WHISTLE_WIDTH = (0.1, 0.3)
+WHISTLE_FLICKER = 0.8       # depth of the on/off flicker (the vortices lock and unlock)
+WHISTLE_FLICKER_TAU = 0.15  # (s)
+WHISTLE_WOBBLE = 0.01       # +-1% slow pitch wobble
+WHISTLE_WOBBLE_TAU = 0.4    # (s)
+WHISTLE_LOUD_MAX = 2.0      # cap of the extra loudness at high speed
+WHISTLE_BOOST = 1.5         # a narrow bandpass on pink noise has low RMS (~1/sqrt(Q))
 
 # Pipe organ "principal chorus": harmonic multiples of the root and their raw
 # levels (8' 4' 2-2/3' 2' 1-3/5' 1-1/3' 1'). The 7th harmonic is off by default
@@ -153,6 +166,8 @@ class WindOrgan:
         self.gust_hist = None  # gust_sweep: the gust of the last blocks (a ring)
         self.gust_hist_pos = 0
         self.gust_dir_state = 0.0
+        self.whistles: list = []  # _Whistle, born when Params.whistles goes up
+        self.whistle_rng = np.random.default_rng(None if seed is None else seed + 15485863)
         self.gust_extra_states = [0.0, 0.0, 0.0]  # fractal layers (tau/2, /4, /8)
         self.q_drift_state = 0.0
 
@@ -361,6 +376,12 @@ class WindOrgan:
             ring_gain = amp_eff * max(0.0, 1.0 + WIND_CHORD_GUST * (gust_mod - 1.0))
             comp["chord"] = self._wind_chord(frames, self._root(f, p), src, ring_gain, p)
 
+        # Edge whistles: they sing only in strong wind, and higher when it blows harder.
+        if p.whistles > 0 or self.whistles:
+            w = self._whistles(frames, amp * gust_mod, src, p)
+            if w is not None:
+                comp["whistle"] = w
+
         if p.organ_mode:
             comp["organ"] = self._organ(frames, f, amp, gust_mod, src, p)
 
@@ -392,6 +413,47 @@ class WindOrgan:
         b = self.gust_hist[(pos - k - 1) % n]
         late = a + (b - a) * (delay - k)
         return np.array([gust_mod, late]) if direction >= 0.0 else np.array([late, gust_mod])
+
+    def _whistles(self, frames: int, speed: float, src: np.ndarray,
+                  p: Params) -> np.ndarray | None:
+        """Aeolian tones: the wind on a wire, a crack, an edge. Each whistle has
+        its own pitch, its own place and its own threshold speed. Above it the
+        whistle comes in, rises in pitch with the speed (Strouhal: f ~ speed) and
+        flickers (the vortices lock on and off). Returns (frames, 2), or None
+        when all whistles are silent."""
+        sr = self.sr
+        count = max(0, min(WHISTLE_MAX, int(p.whistles)))
+        while len(self.whistles) < count:
+            self.whistles.append(_Whistle(len(self.whistles), self.whistle_rng))
+        q = max(2.0, p.whistle_q)
+        tau_alpha = 1.0 - math.exp(-(frames / sr) / WHISTLE_FLICKER_TAU)
+        wob_alpha = 1.0 - math.exp(-(frames / sr) / WHISTLE_WOBBLE_TAU)
+        out = np.zeros((frames, 2), dtype=np.float64)
+        alive = False
+        for i, w in enumerate(self.whistles):
+            over = speed / w.threshold
+            on = (speed - w.threshold) / w.width
+            on = 0.0 if i >= count else max(0.0, min(1.0, on))
+            on = on * on * (3.0 - 2.0 * on)
+            w.flicker, fl = self._lfo_step(w.flicker, tau_alpha, WHISTLE_FLICKER, self.whistle_rng)
+            w.wobble, wb = self._lfo_step(w.wobble, wob_alpha, WHISTLE_WOBBLE, self.whistle_rng)
+            # Aeolian sound grows fast with the speed: louder as it blows harder.
+            g = on * max(0.0, fl) * min(WHISTLE_LOUD_MAX, over ** 1.5)
+            g0, w.gain = w.gain, g
+            if g0 <= 0.0 and g <= 0.0:
+                continue
+            alive = True
+            fc = w.f_base * max(1.0, over) ** max(0.0, p.whistle_track) * wb
+            fc = max(20.0, min(sr * 0.45, fc))
+            b, a = build_biquad_bandpass(fc, q, sr)
+            y, w.zi = lfilter(b, a, src[:, 0], zi=w.zi)
+            y = y * np.linspace(g0, g, frames)
+            theta = (w.pos + 1.0) * (math.pi / 4.0)
+            out[:, 0] += y * (math.sqrt(2.0) * math.cos(theta))
+            out[:, 1] += y * (math.sqrt(2.0) * math.sin(theta))
+        if not alive:
+            return None
+        return out * (WHISTLE_BOOST * math.sqrt(q) * p.whistle_level)
 
     def _buffet(self, frames: int, m: float, p: Params) -> np.ndarray:
         """The fast flutter of real wind on the level: noise lowpassed at
@@ -622,6 +684,20 @@ class WindOrgan:
         self.limiter_gain = new_gain
         np.clip(out, -OUTPUT_HARD_CEIL, OUTPUT_HARD_CEIL, out)
         return out
+
+
+class _Whistle:
+    """State of one edge whistle: where it is, when it sings, its filter."""
+
+    def __init__(self, index: int, rng: np.random.Generator):
+        self.f_base = WHISTLE_F_LO * (WHISTLE_F_HI / WHISTLE_F_LO) ** rng.uniform()
+        self.threshold = rng.uniform(*WHISTLE_THRESHOLD)
+        self.width = rng.uniform(*WHISTLE_WIDTH)
+        self.pos = 0.8 * (((index * GOLDEN + 0.3) % 1.0) * 2.0 - 1.0)   # -0.8..0.8
+        self.gain = 0.0
+        self.flicker = 0.0
+        self.wobble = 0.0
+        self.zi = np.zeros(2)
 
 
 class _Pipe:
