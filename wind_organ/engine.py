@@ -123,6 +123,8 @@ ORGANIC_PIPE_SPREAD = 0.15 # each pipe speaks at its own pressure, +- this
 ORGANIC_FLICKER = 0.35     # each partial's own slow random level, +-35%
 ORGANIC_FLICKER_TAU = 0.4  # (s)
 AIR_HESITATE = 2.0         # more breath while the pipes hesitate
+ORGANIC_JITTER = 0.003     # fast pitch jitter, +-5 cents (x3 while unstable)
+ORGANIC_JITTER_TAU = 0.1   # (s)
 # Wind chord: the wind noise rings at the chord notes. A narrow bandpass on noise
 # has a low RMS, so it gets a boost that grows with Q (bandwidth ~ f / Q).
 WIND_CHORD_BOOST = 1.6
@@ -636,6 +638,11 @@ class WindOrgan:
         alpha = 1.0 - math.exp(-(frames / self.sr) / ORGANIC_FLICKER_TAU)
         pipe.flicker = (1.0 - alpha) * pipe.flicker + alpha * self.organic_rng.standard_normal(len(w))
         norm = math.sqrt((2.0 - alpha) / alpha)
+        # Fast pitch jitter: the turbulence in the jet, a shimmer of a few cents.
+        jit_alpha = 1.0 - math.exp(-(frames / self.sr) / ORGANIC_JITTER_TAU)
+        pipe.jitter_state, pipe.pitch_mod = self._lfo_step(
+            pipe.jitter_state, jit_alpha, ORGANIC_JITTER * organic * (1.0 + (1.0 - speak) + over),
+            self.organic_rng)
         return w * (1.0 + depth * np.tanh(pipe.flicker * (norm * 0.7)))
 
     def _pipes(self, frames: int, f0: float, amps: np.ndarray, p: Params,
@@ -696,7 +703,8 @@ class WindOrgan:
             # exactly k * phase, so the partials stay phase-locked at block joins.
             # The frequency glides from the last block's to this one's: the phase
             # is the running sum of a linear ramp of the step.
-            inc = 2.0 * math.pi * (f + offs) / sr                     # (ranks,)
+            f_now = f * pipe.pitch_mod if organic > 0.0 else f
+            inc = 2.0 * math.pi * (f_now + offs) / sr                 # (ranks,)
             inc0 = inc if pipe.inc is None or len(pipe.inc) != ranks else pipe.inc
             pipe.inc = inc
             dinc = (inc - inc0)[:, None]
@@ -791,6 +799,8 @@ class _Pipe:
         # from another generator, so this rng's draws stay the same.
         self.p_off = None
         self.flicker = np.zeros(len(ORGAN_MULTS))
+        self.jitter_state = 0.0
+        self.pitch_mod = 1.0
 
     def set_ranks(self, ranks: int) -> None:
         """Keep the ranks that stay; new ranks start at a random phase."""
