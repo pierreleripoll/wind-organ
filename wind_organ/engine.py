@@ -6,6 +6,7 @@ Signal flow per block:
         "spectral tilt") or one bandpass + one lowpass (single-band)
     -> multiply by level x gust LFO
     -> optional bourdon voices (narrow bandpass at root + 5th + 3rd)
+    -> optional wind chord (narrow bandpasses at the organ_chord notes)
     -> optional organ drone (additive pipe partials + pitched breath)
     -> tanh saturation (drive)                                   = voice()
     -> stereo FDN reverb, wind_gain                              = room()
@@ -21,6 +22,8 @@ driven by the SAME gust LFO as the wind, which swells, brightens and sharpens it
 with the audible wind, so it sounds like wind resonating a building, not a
 separate instrument. In hold mode the pipe keeps one fixed note; the waver,
 vibrato and gust overblow still detune and swell it, so it keeps breathing.
+With organ_chord it plays several pipes at just-intonation ratios over that
+root, each pipe as organ_ranks copies that beat slowly, spread in stereo.
 
 Filter coefficients are rebuilt per block (cheap), so knob changes apply within
 one block.
@@ -30,6 +33,7 @@ import math
 import numpy as np
 from scipy.signal import butter, iirfilter, lfilter, sosfilt
 
+from .chords import parse_chord
 from .params import Params
 from .reverb import StereoReverb
 
@@ -55,11 +59,13 @@ STORM_SOFT_DARK = 0.6       # very soft -> mid + high bands down up to 60% (muff
 STORM_SOFT_BODY = 0.25      # very soft -> up to +25% low-band body (rounded)
 
 # Pipe organ "principal chorus": harmonic multiples of the root and their raw
-# levels (8' 4' 2-2/3' 2' 1-3/5' 1-1/3' 1'). The 7th harmonic is skipped (no
-# classical organ rank sits at 7x). Levels are normalized to sum 1 at synth time so
-# the worst-case aligned peak stays <= 1 before any gain.
-ORGAN_MULTS = np.array([1, 2, 3, 4, 5, 6, 8], dtype=np.float64)
-ORGAN_AMPS = np.array([1.00, 0.55, 0.30, 0.22, 0.13, 0.10, 0.07], dtype=np.float64)
+# levels (8' 4' 2-2/3' 2' 1-3/5' 1-1/3' 1'). The 7th harmonic is off by default
+# (no classical organ rank sits at 7x); organ_harm7 brings it in at up to
+# ORGAN_AMP7, for just-intonation music built on it. Levels are normalized to
+# sum 1 at synth time so the worst-case aligned peak stays <= 1 before any gain.
+ORGAN_MULTS = np.array([1, 2, 3, 4, 5, 6, 7, 8], dtype=np.float64)
+ORGAN_AMPS = np.array([1.00, 0.55, 0.30, 0.22, 0.13, 0.10, 0.0, 0.07], dtype=np.float64)
+ORGAN_AMP7 = 0.12
 ORGAN_GAIN = 0.85   # headroom so the bright partials aren't crushed by the tanh
 BRIGHT_TAPER = 0.7  # how far organ_brightness can pull down the partials above the root
 AIR_Q = 9.0         # resonance of the "air in the tube" bandpasses (higher = more whistly)
@@ -74,6 +80,16 @@ ORGAN_WIND_PITCH = 0.01
 # root spanning only ORGAN_RANGE_SEMIS semitones.
 ORGAN_BASE_HZ = 220.0     # lowest organ note at octave 0
 ORGAN_RANGE_SEMIS = 7.0
+# Ranks: each pipe gets its own random part of the detune (so pipes don't beat in
+# step), and the detune drifts slowly (so the beat speeds up and slows down).
+RANK_JITTER = 0.4          # +-40% per-pipe change of organ_beat_hz
+RANK_DRIFT = 0.5           # +-50% slow drift of the detune
+RANK_DRIFT_TAU = 4.0       # correlation time of that drift (s)
+GOLDEN = 0.6180339887      # spreads pipe pan positions evenly, in order of birth
+# Wind chord: the wind noise rings at the chord notes. A narrow bandpass on noise
+# has a low RMS, so it gets a boost that grows with Q (bandwidth ~ f / Q).
+WIND_CHORD_BOOST = 1.6
+WIND_CHORD_GUST = 1.0      # extra gust swell on the chord: it comes and goes with the gusts
 
 # Speaker protection on the final bus.
 SUBSONIC_HP_ORDER = 4      # 24 dB/oct: reduces, not just flattens, excursion below cutoff
@@ -128,7 +144,15 @@ class WindOrgan:
         self.bourd_fifth_zi = np.zeros((2, 2))
         self.bourd_third_zi = np.zeros((2, 2))
 
-        self.organ_phase = 0.0
+        # One _Pipe per chord ratio, kept while it fades out. Their random draws
+        # use their own generator, so the wind's random stream (and a seeded
+        # render without a chord) stays the same as before chords existed.
+        self.pipes: dict = {}
+        self.pipe_count = 0
+        self.pipe_rng = np.random.default_rng(None if seed is None else seed + 7919)
+        self.chord_text = ""
+        self.chord = parse_chord("")
+        self.rings: dict = {}  # wind chord: ratio -> [filter state, fade gain]
         self.trem_phase = 0.0
         self.organ_waver_state = 0.0
         self.organ_swell = 0.0  # slow envelope built by sustained strong wind
@@ -288,6 +312,12 @@ class WindOrgan:
             # High-Q bandpass on noise has low RMS; boost so the whistle sits with the wind.
             comp["bourdon"] = (voices / n_voices) * amp_eff * p.tone_level * 4.0
 
+        # Wind chord: the same noise rings at the chord notes, at the level of the
+        # wind and a bit more with the gusts. It works without the organ.
+        if p.wind_chord > 0.0:
+            ring_gain = amp_eff * max(0.0, 1.0 + WIND_CHORD_GUST * (gust_mod - 1.0))
+            comp["chord"] = self._wind_chord(frames, self._root(f, p), src, ring_gain, p)
+
         if p.organ_mode:
             comp["organ"] = self._organ(frames, f, amp, gust_mod, src, p)
 
@@ -313,57 +343,166 @@ class WindOrgan:
 
         # Swell with inertia: the organ only builds while the level sits above
         # organ_threshold, rising over organ_rise_s and fading over organ_fall_s.
+        # organ_follow < 1 blends towards a steady drone that ignores the level.
+        follow = max(0.0, min(1.0, p.organ_follow))
         demand = max(0.0, (amp - p.organ_threshold) / max(1e-6, 1.0 - p.organ_threshold))
+        demand = (follow * demand + (1.0 - follow)) * max(0.0, min(1.0, p.organ_gate))
         swell_tau = p.organ_rise_s if demand > self.organ_swell else p.organ_fall_s
         swell_alpha = 1.0 - math.exp(-(frames / sr) / max(swell_tau, 0.05))
         self.organ_swell += (demand - self.organ_swell) * swell_alpha
 
-        organ_amp_eff = (amp * p.organ_level * self.organ_swell
+        organ_amp_eff = ((follow * amp + 1.0 - follow) * p.organ_level * self.organ_swell
                          * (1.0 + p.organ_wind * gust_dev) * (1.0 + p.trem_depth * trem))
         bright = min(1.0, max(0.0, p.organ_brightness + ORGAN_WIND_BRIGHT * p.organ_wind * gust_dev))
 
-        # Root of the pipe: one fixed note in hold mode, else the pitch squeezed onto
-        # ORGAN_RANGE_SEMIS semitones above a deep base. Either way the waver, the
-        # vibrato and the gust overblow detune it a little, so it never sits dead-flat.
-        if p.organ_hold:
-            f0 = 440.0 * 2.0 ** ((p.organ_note - 69.0) / 12.0)
-        else:
-            ratio = (math.log(f) - math.log(FREQ_LO)) / (math.log(FREQ_HI) - math.log(FREQ_LO))
-            ratio = max(0.0, min(1.0, ratio))
-            f0 = ORGAN_BASE_HZ * (2.0 ** p.organ_octave) * (2.0 ** (ratio * ORGAN_RANGE_SEMIS / 12.0))
-        f0 = f0 * waver_mod * (1.0 + p.trem_pitch * trem) * (1.0 + ORGAN_WIND_PITCH * p.organ_wind * gust_dev)
+        # The waver, the vibrato and the gust overblow detune the root a little, so
+        # it never sits dead-flat.
+        f0 = self._root(f, p) * waver_mod * (1.0 + p.trem_pitch * trem) * (1.0 + ORGAN_WIND_PITCH * p.organ_wind * gust_dev)
         f0 = max(20.0, min(sr * 0.45, f0))
 
-        keep = (ORGAN_MULTS * f0) < (sr * 0.45)
-        keep[0] = True  # the fundamental always plays
-        mults = ORGAN_MULTS[keep]
-        amps = ORGAN_AMPS[keep].copy()
+        amps = ORGAN_AMPS.copy()
+        amps[6] = ORGAN_AMP7 * max(0.0, min(1.0, p.organ_harm7))
         # Brightness pulls down the partials above the root; renormalize so the
         # overall level holds as it moves.
-        amps[mults >= 2.0] *= (1.0 - BRIGHT_TAPER) + BRIGHT_TAPER * bright
+        amps[ORGAN_MULTS >= 2.0] *= (1.0 - BRIGHT_TAPER) + BRIGHT_TAPER * bright
         amps /= max(amps.sum(), 1e-9)
-
-        # One fundamental phase, carried across blocks; harmonic k is exactly
-        # k * phase, so the partials stay phase-locked and seamless at block joins.
-        n = np.arange(frames, dtype=np.float64)
-        phase = self.organ_phase + (2.0 * math.pi * f0 / sr) * n
-        stack = (amps[:, None] * np.sin(mults[:, None] * phase[None, :])).sum(axis=0)
-        self.organ_phase = math.fmod(self.organ_phase + 2.0 * math.pi * f0 * frames / sr,
-                                     2.0 * math.pi)
+        tone = self._pipes(frames, f0, amps, p)
 
         # "Air in the metal tube": noise resonating at the first harmonics, so the
         # breath is pitched (whistling through the pipe), not broadband hiss.
+        # It rings at the lowest pipe of the chord (the root without a chord).
         air = 0.0
         if p.organ_air > 0.0:
+            f_air = f0 * float(self.chord[0])
             for j, (k, w) in enumerate(((1.0, 1.0), (2.0, 0.6), (3.0, 0.4))):
-                fk = f0 * k
+                fk = f_air * k
                 if fk < sr * 0.45:
                     ab, aa = build_biquad_bandpass(fk, AIR_Q, sr)
                     band, self.organ_air_zi[j] = lfilter(ab, aa, src, axis=0, zi=self.organ_air_zi[j])
                     air = air + band * w
 
-        # The tone is mono (centred), the breath is the stereo noise.
-        return (stack[:, None] * ORGAN_GAIN + air * AIR_BOOST * p.organ_air) * organ_amp_eff
+        # The tone is centred unless organ_spread; the breath is the stereo noise.
+        return (tone * ORGAN_GAIN + air * AIR_BOOST * p.organ_air) * organ_amp_eff
+
+    @staticmethod
+    def _root(f: float, p: Params) -> float:
+        """Root of the organ and of the wind chord: one fixed note in hold mode,
+        else the pitch squeezed onto ORGAN_RANGE_SEMIS semitones above a deep base."""
+        if p.organ_hold:
+            return 440.0 * 2.0 ** ((p.organ_note - 69.0) / 12.0)
+        ratio = (math.log(f) - math.log(FREQ_LO)) / (math.log(FREQ_HI) - math.log(FREQ_LO))
+        ratio = max(0.0, min(1.0, ratio))
+        return ORGAN_BASE_HZ * (2.0 ** p.organ_octave) * (2.0 ** (ratio * ORGAN_RANGE_SEMIS / 12.0))
+
+    def _update_chord(self, p: Params) -> None:
+        if p.organ_chord != self.chord_text:
+            try:
+                self.chord = parse_chord(p.organ_chord)
+            except (ValueError, ZeroDivisionError):
+                pass  # bad text: keep the last good chord
+            self.chord_text = p.organ_chord
+
+    def _wind_chord(self, frames: int, root: float, src: np.ndarray, gain: float,
+                    p: Params) -> np.ndarray:
+        """The wind noise through one narrow bandpass per chord note. Noise, not a
+        tone: it sounds like the wind found the chord in the building. Each note
+        fades in and out over organ_fade_s. Returns (frames, 2)."""
+        sr = self.sr
+        self._update_chord(p)
+        for r in self.chord:
+            if r not in self.rings:
+                self.rings[r] = [np.zeros((2, 2)), 0.0]
+        fade = frames / (sr * max(p.organ_fade_s, 0.01))
+        q = max(1.0, p.wind_chord_q)
+        boost = WIND_CHORD_BOOST * math.sqrt(q / len(self.chord))
+        out = np.zeros((frames, 2), dtype=np.float64)
+        for r, ring in list(self.rings.items()):
+            g0 = ring[1]
+            g1 = g0 + max(-fade, min(fade, (1.0 if r in self.chord else 0.0) - g0))
+            ring[1] = g1
+            if g0 <= 0.0 and g1 <= 0.0:
+                del self.rings[r]
+                continue
+            fr = root * float(r)
+            if not 20.0 <= fr < sr * 0.45:
+                continue
+            b, a = build_biquad_bandpass(fr, q, sr)
+            y, ring[0] = lfilter(b, a, src, axis=0, zi=ring[0])
+            g = np.linspace(g0, g1, frames)
+            out += y * (g * g * (3.0 - 2.0 * g))[:, None]
+        return out * (boost * gain * p.wind_chord)
+
+    def _pipes(self, frames: int, f0: float, amps: np.ndarray, p: Params) -> np.ndarray:
+        """All the pipes of the chord, each as organ_ranks detuned copies, panned.
+        A pipe fades in or out over organ_fade_s when the chord changes. Returns
+        (frames, 2). One pipe, one rank, no spread = the classic mono drone."""
+        sr = self.sr
+        self._update_chord(p)
+        ranks = max(1, int(p.organ_ranks))
+        first = not self.pipes  # the very first pipe starts at full gain, like before
+        for r in self.chord:
+            if r not in self.pipes:
+                self.pipes[r] = _Pipe(self.pipe_count, self.pipe_rng, first)
+                self.pipe_count += 1
+
+        fade = frames / (sr * max(p.organ_fade_s, 0.01))
+        norm = 1.0 / math.sqrt(len(self.chord) * ranks)
+        spread = max(0.0, min(1.0, p.organ_spread))
+        drift_alpha = 1.0 - math.exp(-(frames / sr) / RANK_DRIFT_TAU)
+        n = np.arange(frames, dtype=np.float64)
+        out = np.zeros((frames, 2), dtype=np.float64)
+        for r, pipe in list(self.pipes.items()):
+            target = 1.0 if r in self.chord else 0.0
+            g0 = pipe.gain
+            g1 = g0 + max(-fade, min(fade, target - g0))
+            pipe.gain = g1
+            if g0 <= 0.0 and g1 <= 0.0:
+                del self.pipes[r]
+                continue
+            f = f0 * float(r)
+            if f >= sr * 0.45:
+                continue
+            pipe.set_ranks(ranks)
+            if ranks > 1:
+                pipe.drift, drift_mod = self._lfo_step(pipe.drift, drift_alpha, RANK_DRIFT)
+                offs = p.organ_beat_hz * pipe.jitter * drift_mod * np.linspace(-0.5, 0.5, ranks)
+            else:
+                offs = np.zeros(1)
+            keep = ((ORGAN_MULTS * f) < (sr * 0.45)) & (amps > 0.0)
+            keep[0] = True  # the fundamental always plays
+            mults, a = ORGAN_MULTS[keep], amps[keep]
+            if p.organ_tone_hz > 0.0:
+                a = a / (1.0 + (mults * f / p.organ_tone_hz) ** 2)
+
+            # One fundamental phase per rank, carried across blocks; harmonic k is
+            # exactly k * phase, so the partials stay phase-locked at block joins.
+            inc = 2.0 * math.pi * (f + offs) / sr                     # (ranks,)
+            ph = pipe.phase[:, None] + inc[:, None] * n[None, :]      # (ranks, frames)
+            arg = mults[:, None, None] * ph[None]
+            wave = np.einsum("k,krn->rn", a, np.sin(arg))
+            pipe.phase = np.fmod(pipe.phase + inc * frames, 2.0 * math.pi)
+
+            # Pan: the pipe sits at its own place and its ranks spread around it,
+            # so the beat moves between the speakers. Equal power, centre = 1 / 1.
+            rank_pos = np.linspace(-1.0, 1.0, ranks) if ranks > 1 else np.zeros(1)
+            pan = spread * np.clip(0.5 * pipe.pos + 0.5 * rank_pos, -1.0, 1.0)
+            theta = (pan + 1.0) * (math.pi / 4.0)
+            gl, gr = math.sqrt(2.0) * np.cos(theta), math.sqrt(2.0) * np.sin(theta)
+            # Panning alone keeps L/R ~0.64 correlated. Spaced mics in a room hear
+            # each pipe with a phase offset between the ears, so each rank gets
+            # one too (at most +-90 degrees: mono loses 3 dB at worst, no notch).
+            if spread > 0.0:
+                shift = spread * pipe.lr_shift
+                quad = np.einsum("k,krn->rn", a, np.cos(arg))
+                wave_r = np.cos(shift)[:, None] * wave + np.sin(shift)[:, None] * quad
+            else:
+                wave_r = wave
+
+            g = np.linspace(g0, g1, frames)
+            g = g * g * (3.0 - 2.0 * g) * norm   # smoothstep: soft start and end of a fade
+            out[:, 0] += gl @ wave * g
+            out[:, 1] += gr @ wave_r * g
+        return out
 
     def room(self, sat: np.ndarray, p: Params) -> np.ndarray:
         """Reverb (wet/dry crossfade) then wind_gain. No clipping here."""
@@ -395,3 +534,25 @@ class WindOrgan:
         self.limiter_gain = new_gain
         np.clip(out, -OUTPUT_HARD_CEIL, OUTPUT_HARD_CEIL, out)
         return out
+
+
+class _Pipe:
+    """State of one chord pipe: its ranks' phases, its fade gain, its place."""
+
+    def __init__(self, index: int, rng: np.random.Generator, full: bool):
+        self.gain = 1.0 if full else 0.0
+        self.pos = ((index * GOLDEN) % 1.0) * 2.0 - 1.0   # -1..1, spread in birth order
+        self.jitter = 1.0 + RANK_JITTER * rng.uniform(-1.0, 1.0)
+        self.drift = 0.0
+        self.rng = rng
+        self.phase = np.zeros(1)
+        self.lr_shift = rng.uniform(-0.5 * math.pi, 0.5 * math.pi, 1)
+
+    def set_ranks(self, ranks: int) -> None:
+        """Keep the ranks that stay; new ranks start at a random phase."""
+        if len(self.phase) != ranks:
+            k = min(ranks, len(self.phase))
+            phase = self.rng.uniform(0.0, 2.0 * math.pi, ranks)
+            shift = self.rng.uniform(-0.5 * math.pi, 0.5 * math.pi, ranks)
+            phase[:k], shift[:k] = self.phase[:k], self.lr_shift[:k]
+            self.phase, self.lr_shift = phase, shift

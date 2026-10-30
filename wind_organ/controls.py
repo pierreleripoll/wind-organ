@@ -45,12 +45,17 @@ REST_LEVEL = 0.08    # level during a lull (the wind eases down, not fully out)
 
 class Wanderer:
     """Slow random wind gestures: eases between random waypoints, with lulls.
-    step(dt) returns (pitch, level), both 0..1. Pure: no thread, no clock."""
+    step(dt) returns (pitch, level), both 0..1. Pure: no thread, no clock.
 
-    def __init__(self, rng: random.Random | None = None):
+    The pitch moves the wind's colour (the mid band follows it), the level its
+    strength. floor (0..1, same scale as the level) is the quietest the wind
+    gets: a lull eases down to it instead of to near silence. 0 = old lulls."""
+
+    def __init__(self, rng: random.Random | None = None, floor: float = 0.0):
         self.rng = rng or random.Random()
+        self.floor = max(0.0, min(1.0, floor))
         self.x0 = self.tx = self.rng.random()
-        self.y0 = self.ty = LEVEL_LO
+        self.y0 = self.ty = max(LEVEL_LO, self.floor)
         self.glide = 1.0
         self.speed = 0.0
 
@@ -60,9 +65,9 @@ class Wanderer:
             self.x0, self.y0 = self.tx, self.ty
             self.tx = max(0.0, min(1.0, self.tx + rng.uniform(-PITCH_STEP, PITCH_STEP)))
             if rng.random() < REST_PROB:
-                self.ty = rng.uniform(0.0, REST_LEVEL)
+                self.ty = rng.uniform(self.floor, max(self.floor, REST_LEVEL))
             else:
-                self.ty = rng.uniform(LEVEL_LO, LEVEL_HI)
+                self.ty = rng.uniform(max(LEVEL_LO, self.floor), LEVEL_HI)
             self.speed = 1.0 / rng.uniform(MIN_GESTURE_S, MAX_GESTURE_S)
             self.glide = 0.0
         self.glide = min(1.0, self.glide + dt * self.speed)

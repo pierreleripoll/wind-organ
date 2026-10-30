@@ -57,6 +57,13 @@ class Params:
     use_fifth: bool = False        # add a whistle at the fifth
     third_mode: int = 0            # 0 = no third, 1 = minor (6:5), 2 = major (5:4)
 
+    # --- wind chord: the wind itself rings at the notes of organ_chord ---
+    # Narrow bandpasses on the wind noise, at the chord ratios over the organ root
+    # (organ_note in hold mode). It follows the wind level and the gusts, so the
+    # chord is half heard, inside the wind. Works with the organ off.
+    wind_chord: float = 0.0        # 0 = off
+    wind_chord_q: float = 40.0     # higher = more pitched, lower = more airy
+
     # --- organ: a pipe drone that the wind blows through ---
     organ_mode: bool = False
     # Hold one fixed note (organ_note, MIDI number) instead of following the
@@ -75,9 +82,32 @@ class Params:
     organ_threshold: float = 0.55
     organ_rise_s: float = 6.0
     organ_fall_s: float = 2.5
+    # 1 = the organ plays, 0 = it fades out over organ_fall_s and stays silent.
+    # Back to 1, it comes up again over organ_rise_s. A host uses it to bring the
+    # organ in and out slowly (organ_mode cuts it at once).
+    organ_gate: float = 1.0
     trem_depth: float = 0.05       # organ tremulant on the level
     trem_rate: float = 5.5         # Hz (a classic tremulant is 5-6 Hz)
     trem_pitch: float = 0.003      # tremulant on the pitch (fraction, ~5 cents)
+    # Chord: just-intonation ratios over the organ root, as text ("1 3/2 7/4").
+    # Each ratio is one pipe. "" = one pipe at the root (the classic drone). See
+    # chords.py for the chords of Ellen Arkbro's "For organ and brass".
+    organ_chord: str = ""
+    organ_fade_s: float = 1.0      # crossfade time when the chord changes (s)
+    # Ranks: copies of each pipe, a fraction of a Hz apart. They beat slowly
+    # against each other (the slow swell of real pipes in a room). 1 = one pipe.
+    organ_ranks: int = 1
+    organ_beat_hz: float = 0.3     # widest detune between the ranks of one pipe (Hz)
+    # Spread the pipes and their ranks left and right. 0 = all in the centre.
+    organ_spread: float = 0.0
+    organ_harm7: float = 0.0       # 7th harmonic in each pipe (0 = skipped, 1 = full)
+    # Soften the partials of each pipe above this frequency (12 dB/oct), so high
+    # pipes stay dark and round, like soft brass. 0 = off (full principal chorus).
+    organ_tone_hz: float = 0.0
+    # How much the organ follows the wind level. 1 = it only swells with strong
+    # wind (see organ_threshold). 0 = a steady drone: the wind only colours it
+    # (gusts still swell, brighten and sharpen it through organ_wind).
+    organ_follow: float = 1.0
 
     # --- room and output ---
     reverb_mix: float = 0.25       # 0 = dry (reverb off, no CPU)
@@ -89,7 +119,7 @@ class Params:
     # can't hear but that shakes the woofer. The wind body sits at ~110 Hz.
     subsonic_hp_hz: float = 30.0
 
-    # Play only these layers: "low", "mid", "high", "bourdon", "organ".
+    # Play only these layers: "low", "mid", "high", "bourdon", "chord", "organ".
     # Empty = all of them. Replace the set, don't mutate it (the engine may be
     # reading it from the audio thread).
     solo: frozenset = field(default_factory=frozenset)
@@ -115,6 +145,8 @@ class Params:
                 v = bool(v)
             elif isinstance(getattr(self, f.name), int):
                 v = int(round(v))
+            elif isinstance(getattr(self, f.name), str):
+                v = str(v)
             else:
                 v = float(v)
             setattr(self, f.name, v)

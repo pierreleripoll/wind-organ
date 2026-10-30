@@ -4,6 +4,9 @@
     python -m wind_organ --no-tui              # autoplay only, Ctrl+C to stop
     python -m wind_organ --render out.wav --seconds 30
     python -m wind_organ --preset preset.json --organ
+    python -m wind_organ --preset presets/organ_and_brass.json --chords piece --floor 0.4
+    python -m wind_organ --preset presets/slow_organ.json --chords wander --chords-after 180 --floor 0.4
+    python -m wind_organ --preset presets/slow_organ.json --chords wander --cue --floor 0.4
     python -m wind_organ --list                # audio devices
 """
 import argparse
@@ -13,6 +16,7 @@ import threading
 
 import numpy as np
 
+from .chords import ChordPlayer
 from .controls import Smoother, Wanderer
 from .engine import SR, WindOrgan, pitch_to_freq
 from .params import Params
@@ -24,7 +28,9 @@ LEVEL_CURVE = 3.0  # level^curve: soft levels get most of the key/gesture travel
 class Player:
     """What the UI thread and the audio thread share, guarded by `lock`."""
 
-    def __init__(self, params: Params, autoplay: bool, seed: int | None = None):
+    def __init__(self, params: Params, autoplay: bool, seed: int | None = None,
+                 floor: float = 0.0, chords: ChordPlayer | None = None,
+                 chords_after: float = 0.0):
         self.lock = threading.Lock()
         self.params = params
         self.pitch = 0.4   # 0..1
@@ -32,14 +38,27 @@ class Player:
         self.autoplay = autoplay
         self.synth = WindOrgan(SR, seed=seed)
         self.smoother = Smoother(SR)
-        self.wanderer = Wanderer(random.Random(seed))
+        self.wanderer = Wanderer(random.Random(seed), floor=floor)
+        # Chord autoplay: steps Params.organ_chord through a progression.
+        self.chords = chords
+        self.chord_auto = chords is not None
+        # Seconds of the organ's own note before the chords start (--chords-after).
+        self.chord_wait = chords_after
 
     def block(self, frames: int) -> np.ndarray:
         with self.lock:
             if self.autoplay:
                 self.pitch, self.level = self.wanderer.step(frames / SR)
+            if self.chord_auto:
+                if self.chord_wait > 0.0:
+                    self.chord_wait -= frames / SR
+                else:
+                    self.params.organ_chord = self.chords.step(frames / SR)
             pitch, level = self.pitch, self.level
             p = self.params.snapshot()
+            if self.chord_auto and self.chord_wait <= 0.0:
+                # Slow chords glide slowly: the crossfade follows the chord length.
+                p.organ_fade_s *= self.chords.step_now() / self.chords.step_s
         freq, lvl = self.smoother.step(frames, pitch_to_freq(pitch), level ** LEVEL_CURVE)
         return self.synth.render(frames, freq, lvl, p)
 
@@ -88,11 +107,19 @@ def tui(stdscr, player: Player, preset_path: str | None) -> None:
                 f"level {level:7.2f}     [{'#' * int(level * 30):<30}]",
                 f"organ swell {player.synth.organ_swell:4.2f}"
                 + (f"   held note {p.organ_note:.0f}" if p.organ_hold else ""),
+                f"chord [{p.organ_chord or '1'}]"
+                + (f" {player.chords.name} ({player.chords.step_now():.0f} s)"
+                   if player.chord_auto and player.chord_wait <= 0.0 else "")
+                + (f" chords in {player.chord_wait:.0f} s" if player.chord_auto and player.chord_wait > 0.0 else "")
+                + f"   ranks {p.organ_ranks}",
                 "",
                 f"[{'x' if auto else ' '}] autoplay (space)   [{'x' if p.organ_mode else ' '}] organ (o)"
                 f"   [{'x' if p.organ_hold else ' '}] hold note (h)",
                 f"[{'x' if p.use_gust else ' '}] gust (g)   [{'x' if p.use_3band else ' '}] 3-band (3)"
                 f"   bourdon {p.tone_level:.2f} (b/B)",
+                f"[{'x' if p.organ_mode and p.organ_gate > 0.0 else ' '}] drone (d)"
+                f"   [{'x' if player.chord_auto else ' '}] chord autoplay (c)   ranks (r)"
+                f"   wind chord {p.wind_chord:.2f} (n/N)",
                 "",
                 "left/right pitch   up/down level   [ ] held note"
                 + ("   w save preset" if preset_path else "") + "   q quit",
@@ -137,6 +164,30 @@ def tui(stdscr, player: Player, preset_path: str | None) -> None:
                 p.tone_level = max(0.0, round(p.tone_level - 0.05, 2))
             elif key == ord("B"):
                 p.tone_level = min(1.0, round(p.tone_level + 0.05, 2))
+            elif key == ord("d"):
+                # The drone fades in over organ_rise_s and out over organ_fall_s.
+                if p.organ_mode and p.organ_gate > 0.0:
+                    p.organ_gate = 0.0
+                else:
+                    p.organ_mode = True
+                    p.organ_gate = 1.0
+            elif key == ord("c"):
+                if player.chords is None:
+                    player.chords = ChordPlayer()
+                player.chord_auto = not player.chord_auto
+                if player.chord_auto:
+                    player.chord_wait = 0.0  # start now, even during --chords-after
+                    player.chords.restart()  # slow again, if --chord-ramp
+                    p.organ_mode = True
+                    p.organ_gate = 1.0
+                else:
+                    p.organ_chord = ""  # back to the single note
+            elif key == ord("n"):
+                p.wind_chord = max(0.0, round(p.wind_chord - 0.05, 2))
+            elif key == ord("N"):
+                p.wind_chord = min(1.0, round(p.wind_chord + 0.05, 2))
+            elif key == ord("r"):
+                p.organ_ranks = p.organ_ranks % 3 + 1
             elif key == ord("w") and preset_path:
                 p.save(preset_path)
                 msg = f"saved {preset_path}"
@@ -149,6 +200,25 @@ def main(argv=None) -> None:
     ap.add_argument("--organ", action="store_true", help="start with the organ on")
     ap.add_argument("--hold", type=float, metavar="NOTE",
                     help="organ holds this MIDI note (implies --organ)")
+    ap.add_argument("--chords", choices=["piece", "wander"],
+                    help="chord autoplay: the chords of 'For organ and brass' in order, "
+                         "or a random walk on the same moves (implies --organ, holds C3, "
+                         "starts the wind autoplay)")
+    ap.add_argument("--chord-s", type=float, default=10.0, help="seconds per chord")
+    ap.add_argument("--chords-after", type=float, default=0.0, metavar="SECONDS",
+                    help="hold the organ's single note this long, then start the chords")
+    ap.add_argument("--chord-ramp", type=float, default=0.0, metavar="SECONDS",
+                    help="start the chords slow and speed up to --chord-s over this time")
+    ap.add_argument("--chord-slow-s", type=float, default=40.0,
+                    help="length of the first chord with --chord-ramp")
+    ap.add_argument("--chord-start", type=float, default=0.0, metavar="SECONDS",
+                    help="start the chords at this time of the piece (650 = the C2 pedal part)")
+    ap.add_argument("--floor", type=float, default=0.0,
+                    help="autoplay: quietest wind level, 0..1 (0 = lulls go near silent); "
+                         "starts the wind autoplay")
+    ap.add_argument("--cue", action="store_true",
+                    help="start with the wind only: d brings the organ note in, "
+                         "c starts the chords (keyboard UI)")
     ap.add_argument("--no-tui", action="store_true", help="no keyboard UI, autoplay only")
     ap.add_argument("--render", metavar="WAV", help="render offline to a WAV file (autoplay)")
     ap.add_argument("--seconds", type=float, default=30.0, help="length for --render")
@@ -168,9 +238,27 @@ def main(argv=None) -> None:
     if args.hold is not None:
         params.organ_hold = True
         params.organ_note = args.hold
+    chords = None
+    if args.cue and not args.chords:
+        args.chords = "piece"
+    if args.chords:
+        params.organ_mode = True
+        if args.hold is None:
+            params.organ_hold = True
+            params.organ_note = 48.0  # C3: the chords are ratios over it
+        chords = ChordPlayer(step_s=args.chord_s, mode=args.chords, rng=random.Random(args.seed),
+                             slow_s=args.chord_slow_s, ramp_s=args.chord_ramp,
+                             start=int(args.chord_start // 10.0))
 
-    autoplay = bool(args.render or args.no_tui)
-    player = Player(params, autoplay=autoplay, seed=args.seed)
+    # --chords and --floor are autoplay settings, so they start the wind autoplay
+    # in the keyboard UI too (space still stops it, the arrows take over).
+    autoplay = bool(args.render or args.no_tui or args.chords or args.floor > 0.0)
+    player = Player(params, autoplay=autoplay, seed=args.seed, floor=args.floor, chords=chords,
+                    chords_after=args.chords_after)
+    if args.cue:
+        # Wind only. The organ is ready but silent, the chords wait for c.
+        params.organ_gate = 0.0
+        player.chord_auto = False
     if args.render:
         render_wav(player, args.render, args.seconds)
         return
