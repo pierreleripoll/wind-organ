@@ -125,6 +125,12 @@ ORGANIC_FLICKER_TAU = 0.4  # (s)
 AIR_HESITATE = 2.0         # more breath while the pipes hesitate
 ORGANIC_JITTER = 0.003     # fast pitch jitter, +-5 cents (x3 while unstable)
 ORGANIC_JITTER_TAU = 0.1   # (s)
+CHIFF_TAU = 0.04           # decay of the chiff, the puff when a pipe starts to speak (s)
+CHIFF_HARM = 3.0           # it sits near this harmonic
+CHIFF_Q = 5.0
+CHIFF_GAIN = 20.0          # a bandpass on pink noise has a low RMS
+CHIFF_HYST = 0.1           # the pressure must go this far over SPEAK_LO to fire
+CHIFF_MIN = 1e-3           # below this the chiff is over
 # Wind chord: the wind noise rings at the chord notes. A narrow bandpass on noise
 # has a low RMS, so it gets a boost that grows with Q (bandwidth ~ f / Q).
 WIND_CHORD_BOOST = 1.6
@@ -546,7 +552,7 @@ class WindOrgan:
         # How hard the air pushes into the pipes right now (see SPEAK_LO).
         organic = max(0.0, min(1.0, p.organ_organic))
         pressure = self.organ_swell * (1.0 + p.organ_wind * gust_dev)
-        tone = self._pipes(frames, f0, amps, p, pressure, organic)
+        tone = self._pipes(frames, f0, amps, p, pressure, organic, src)
 
         # "Air in the metal tube": noise resonating at the first harmonics, so the
         # breath is pitched (whistling through the pipe), not broadband hiss.
@@ -628,6 +634,15 @@ class WindOrgan:
             pipe.p_off = self.organic_rng.uniform(-1.0, 1.0) * ORGANIC_PIPE_SPREAD
         pp = pressure + pipe.p_off * organic
         speak = _smooth01((pp - SPEAK_LO) / SPEAK_W)
+        # Chiff: when the pressure crosses the speaking point upwards, the pipe
+        # starts with a puff of noise. It fires again only after the pressure
+        # went back under SPEAK_LO.
+        if pipe.chiff_armed is None:
+            pipe.chiff_armed = pp < SPEAK_LO + CHIFF_HYST
+        if pipe.chiff_armed and pp > SPEAK_LO + CHIFF_HYST:
+            pipe.chiff, pipe.chiff_armed = 1.0, False
+        elif pp < SPEAK_LO:
+            pipe.chiff_armed = True
         over = _smooth01((pp - OVERBLOW_AT) / OVERBLOW_W)
         w = np.ones(len(ORGAN_MULTS))
         w[0] = max(0.0, 1.0 - organic * (1.0 - speak) - organic * OVERBLOW_DROP * over)
@@ -646,7 +661,8 @@ class WindOrgan:
         return w * (1.0 + depth * np.tanh(pipe.flicker * (norm * 0.7)))
 
     def _pipes(self, frames: int, f0: float, amps: np.ndarray, p: Params,
-               pressure: float = 1.0, organic: float = 0.0) -> np.ndarray:
+               pressure: float = 1.0, organic: float = 0.0,
+               src: np.ndarray | None = None) -> np.ndarray:
         """All the pipes of the chord, each as organ_ranks detuned copies, panned.
         A pipe fades in or out over organ_fade_s when the chord changes. Returns
         (frames, 2). One pipe, one rank, no spread = the classic mono drone."""
@@ -734,6 +750,18 @@ class WindOrgan:
             g = g * g * (3.0 - 2.0 * g) * norm   # smoothstep: soft start and end of a fade
             out[:, 0] += gl @ wave * g
             out[:, 1] += gr @ wave_r * g
+
+            if pipe.chiff > CHIFF_MIN and src is not None and organic > 0.0:
+                # The chiff: noise near the 3rd harmonic, a fast decay.
+                decay = math.exp(-frames / (sr * CHIFF_TAU))
+                env = pipe.chiff * decay ** (n / frames)
+                pipe.chiff *= decay
+                fc = max(20.0, min(sr * 0.45, f * CHIFF_HARM))
+                cb, ca = build_biquad_bandpass(fc, CHIFF_Q, sr)
+                puff, pipe.chiff_zi = lfilter(cb, ca, src[:, 0], zi=pipe.chiff_zi)
+                puff = puff * env * g * (CHIFF_GAIN * organic)
+                out[:, 0] += puff * float(gl.mean())
+                out[:, 1] += puff * float(gr.mean())
         return out
 
     def room(self, sat: np.ndarray, p: Params) -> np.ndarray:
@@ -801,6 +829,9 @@ class _Pipe:
         self.flicker = np.zeros(len(ORGAN_MULTS))
         self.jitter_state = 0.0
         self.pitch_mod = 1.0
+        self.chiff = 0.0           # chiff envelope, 1 when the pipe starts to speak
+        self.chiff_armed = None
+        self.chiff_zi = np.zeros(2)
 
     def set_ranks(self, ranks: int) -> None:
         """Keep the ranks that stay; new ranks start at a random phase."""
