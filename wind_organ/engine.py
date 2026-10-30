@@ -36,6 +36,7 @@ from scipy.signal import butter, iirfilter, lfilter, sosfilt
 from .chords import parse_chord
 from .params import Params
 from .reverb import StereoReverb
+from .tube import Tube
 
 SR = 48000
 FREQ_LO, FREQ_HI = 150.0, 5000.0   # pitch range the wind maps onto (Hz, log)
@@ -131,6 +132,7 @@ CHIFF_Q = 5.0
 CHIFF_GAIN = 20.0          # a bandpass on pink noise has a low RMS
 CHIFF_HYST = 0.1           # the pressure must go this far over SPEAK_LO to fire
 CHIFF_MIN = 1e-3           # below this the chiff is over
+TUBE_LEVEL = 1.0           # blown tube level next to the sine pipe
 # Wind chord: the wind noise rings at the chord notes. A narrow bandpass on noise
 # has a low RMS, so it gets a boost that grows with Q (bandwidth ~ f / Q).
 WIND_CHORD_BOOST = 1.6
@@ -221,6 +223,10 @@ class WindOrgan:
         self.organ_swell = 0.0  # slow envelope built by sustained strong wind
         self.organ_amp_prev = None  # organ level at the end of the last block
         self.organic_rng = np.random.default_rng(None if seed is None else seed + 32452843)
+        self.organic_prev = None
+        self.tube_tone_hz = 0.0   # organ_tone_hz lowpass on the tubes, built on use
+        self.tube_tone_ba = None
+        self.tube_tone_zi = np.zeros((2, 2))
         self.organ_air_zi = [np.zeros((2, 2)) for _ in range(3)]  # air bands (f0, 2f0, 3f0)
 
         # The subsonic cutoff is a knob, so its SOS is rebuilt only when it changes;
@@ -644,6 +650,7 @@ class WindOrgan:
         elif pp < SPEAK_LO:
             pipe.chiff_armed = True
         over = _smooth01((pp - OVERBLOW_AT) / OVERBLOW_W)
+        pipe.pressure, pipe.over = pp, over   # the tube of this pipe blows with them
         w = np.ones(len(ORGAN_MULTS))
         w[0] = max(0.0, 1.0 - organic * (1.0 - speak) - organic * OVERBLOW_DROP * over)
         w[1] = 1.0 + organic * (HESITATE_OCT * (1.0 - speak) + OVERBLOW_OCT * over)
@@ -681,7 +688,16 @@ class WindOrgan:
         drift_alpha = 1.0 - math.exp(-(frames / sr) / RANK_DRIFT_TAU)
         n = np.arange(frames, dtype=np.float64)
         glide = n * (n - 1.0) / (2.0 * frames)   # sum of the ramp n/frames up to n
+        # organ_organic crossfades the sine pipes into blown tubes, with equal
+        # power (they are not phase-locked). Ramped across the block.
+        o0 = organic if self.organic_prev is None else self.organic_prev
+        self.organic_prev = organic
+        w_sine = np.cos(np.linspace(o0, organic, frames) * (math.pi / 2.0))
+        w_tube = np.sin(np.linspace(o0, organic, frames) * (math.pi / 2.0))
+        sines = max(o0, organic) < 1.0
+        tubes = max(o0, organic) > 0.0 and src is not None
         out = np.zeros((frames, 2), dtype=np.float64)
+        tube_out = np.zeros((frames, 2), dtype=np.float64) if tubes else None
         for r, pipe in list(self.pipes.items()):
             target = 1.0 if r in self.chord else 0.0
             g0 = pipe.gain
@@ -712,23 +728,7 @@ class WindOrgan:
                 # before it speaks.
                 a_now = a_now * self._pipe_speech(pipe, pressure * _smooth01(g1), organic, frames)
             pipe.amps = a_now
-            mults = ORGAN_MULTS[keep]
-            a = np.linspace(a_prev[keep], a_now[keep], frames, axis=1)   # (partials, frames)
-
-            # One fundamental phase per rank, carried across blocks; harmonic k is
-            # exactly k * phase, so the partials stay phase-locked at block joins.
-            # The frequency glides from the last block's to this one's: the phase
-            # is the running sum of a linear ramp of the step.
             f_now = f * pipe.pitch_mod if organic > 0.0 else f
-            inc = 2.0 * math.pi * (f_now + offs) / sr                 # (ranks,)
-            inc0 = inc if pipe.inc is None or len(pipe.inc) != ranks else pipe.inc
-            pipe.inc = inc
-            dinc = (inc - inc0)[:, None]
-            ph = pipe.phase[:, None] + inc0[:, None] * n[None, :] + dinc * glide[None, :]
-            arg = mults[:, None, None] * ph[None]
-            wave = np.einsum("kn,krn->rn", a, np.sin(arg))
-            pipe.phase = np.fmod(pipe.phase + inc0 * frames + (inc - inc0) * (frames - 1) / 2.0,
-                                 2.0 * math.pi)
 
             # Pan: the pipe sits at its own place and its ranks spread around it,
             # so the beat moves between the speakers. Equal power, centre = 1 / 1.
@@ -736,20 +736,53 @@ class WindOrgan:
             pan = spread * np.clip(0.5 * pipe.pos + 0.5 * rank_pos, -1.0, 1.0)
             theta = (pan + 1.0) * (math.pi / 4.0)
             gl, gr = math.sqrt(2.0) * np.cos(theta), math.sqrt(2.0) * np.sin(theta)
-            # Panning alone keeps L/R ~0.64 correlated. Spaced mics in a room hear
-            # each pipe with a phase offset between the ears, so each rank gets
-            # one too (at most +-90 degrees: mono loses 3 dB at worst, no notch).
-            if spread > 0.0:
-                shift = spread * pipe.lr_shift
-                quad = np.einsum("kn,krn->rn", a, np.cos(arg))
-                wave_r = np.cos(shift)[:, None] * wave + np.sin(shift)[:, None] * quad
-            else:
-                wave_r = wave
-
             g = np.linspace(g0, g1, frames)
             g = g * g * (3.0 - 2.0 * g) * norm   # smoothstep: soft start and end of a fade
-            out[:, 0] += gl @ wave * g
-            out[:, 1] += gr @ wave_r * g
+
+            if sines:
+                mults = ORGAN_MULTS[keep]
+                a = np.linspace(a_prev[keep], a_now[keep], frames, axis=1)   # (partials, frames)
+                # One fundamental phase per rank, carried across blocks; harmonic k
+                # is exactly k * phase, so the partials stay phase-locked at block
+                # joins. The frequency glides from the last block's to this one's:
+                # the phase is the running sum of a linear ramp of the step.
+                inc = 2.0 * math.pi * (f_now + offs) / sr                 # (ranks,)
+                inc0 = inc if pipe.inc is None or len(pipe.inc) != ranks else pipe.inc
+                pipe.inc = inc
+                dinc = (inc - inc0)[:, None]
+                ph = pipe.phase[:, None] + inc0[:, None] * n[None, :] + dinc * glide[None, :]
+                arg = mults[:, None, None] * ph[None]
+                wave = np.einsum("kn,krn->rn", a, np.sin(arg))
+                pipe.phase = np.fmod(pipe.phase + inc0 * frames + (inc - inc0) * (frames - 1) / 2.0,
+                                     2.0 * math.pi)
+                # Panning alone keeps L/R ~0.64 correlated. Spaced mics in a room
+                # hear each pipe with a phase offset between the ears, so each rank
+                # gets one too (at most +-90 degrees: mono loses 3 dB at worst).
+                if spread > 0.0:
+                    shift = spread * pipe.lr_shift
+                    quad = np.einsum("kn,krn->rn", a, np.cos(arg))
+                    wave_r = np.cos(shift)[:, None] * wave + np.sin(shift)[:, None] * quad
+                else:
+                    wave_r = wave
+                gs = g if organic == 0.0 and o0 == 0.0 else g * w_sine
+                out[:, 0] += gl @ wave * gs
+                out[:, 1] += gr @ wave_r * gs
+
+            if tubes:
+                # The same pipe, blown: its tube gets the pipe's pressure (swell,
+                # gust, its own fade) and overblows with it.
+                if pipe.tube is None:
+                    pipe.tube = Tube(sr, ranks, self.organic_rng)
+                pipe.tube.set_ranks(ranks)
+                tp0 = pipe.pressure if pipe.tube_pressure is None else pipe.tube_pressure
+                pipe.tube_pressure = pipe.pressure
+                y = pipe.tube.process(f_now + offs, tp0, pipe.pressure, src, 1.0 + pipe.over)
+                gt = g * w_tube * TUBE_LEVEL
+                tube_out[:, 0] += gl @ y * gt
+                tube_out[:, 1] += gr @ y * gt
+            else:
+                pipe.tube = None   # it starts fresh (silent) next time
+                pipe.tube_pressure = None
 
             if pipe.chiff > CHIFF_MIN and src is not None and organic > 0.0:
                 # The chiff: noise near the 3rd harmonic, a fast decay.
@@ -762,6 +795,16 @@ class WindOrgan:
                 puff = puff * env * g * (CHIFF_GAIN * organic)
                 out[:, 0] += puff * float(gl.mean())
                 out[:, 1] += puff * float(gr.mean())
+        if tubes:
+            # organ_tone_hz softens the tubes too (12 dB/oct), like the sine partials.
+            if p.organ_tone_hz > 0.0:
+                fc = min(p.organ_tone_hz, sr * 0.45)
+                if fc != self.tube_tone_hz:
+                    self.tube_tone_ba = butter(2, fc / (sr / 2.0))
+                    self.tube_tone_hz = fc
+                tube_out, self.tube_tone_zi = lfilter(*self.tube_tone_ba, tube_out, axis=0,
+                                                      zi=self.tube_tone_zi)
+            out += tube_out
         return out
 
     def room(self, sat: np.ndarray, p: Params) -> np.ndarray:
@@ -830,6 +873,10 @@ class _Pipe:
         self.jitter_state = 0.0
         self.pitch_mod = 1.0
         self.chiff = 0.0           # chiff envelope, 1 when the pipe starts to speak
+        self.pressure = 0.0        # air pressure on this pipe, and how far it overblows
+        self.over = 0.0
+        self.tube = None           # the blown pipe (tube.py), while organ_organic > 0
+        self.tube_pressure = None
         self.chiff_armed = None
         self.chiff_zi = np.zeros(2)
 

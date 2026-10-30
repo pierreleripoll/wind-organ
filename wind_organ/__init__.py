@@ -11,7 +11,8 @@ from .controls import Smoother, Wanderer
 from .engine import FREQ_HI, FREQ_LO, SR, WindOrgan, pitch_to_freq
 from .params import Params
 from .reverb import StereoReverb
+from .tube import Tube
 
 __all__ = ["CHORDS", "FREQ_HI", "FREQ_LO", "PIECE", "SR", "ChordPlayer", "Params",
-           "Smoother", "StereoReverb", "Wanderer", "WindOrgan", "parse_chord",
+           "Smoother", "StereoReverb", "Tube", "Wanderer", "WindOrgan", "parse_chord",
            "pitch_to_freq"]

@@ -44,7 +44,7 @@ TUBE_F_MIN = 15.0
 NOISE_RMS = 0.132         # RMS of the engine's pink wind noise, to bring it to 1
 # Loop gain from the air pressure: g = TUBE_G0 + TUBE_G1 * pressure. The pipe
 # starts to sing where g passes 1, at pressure (1 - TUBE_G0) / TUBE_G1.
-TUBE_G0 = 0.7
+TUBE_G0 = 0.8
 TUBE_G1 = 0.75
 TUBE_Q = 1.0              # Q of the mode filter: lower = more harmonics, less stable pitch
 TUBE_NOISE = 0.15         # wind noise into the loop, per unit of pressure
