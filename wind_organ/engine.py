@@ -136,6 +136,7 @@ class WindOrgan:
         self.mid_zi = np.zeros((2, 2))
         self.high_zi = np.zeros((2, 2))
         self.gust_state = 0.0
+        self.amp_prev = None  # wind level at the end of the last block
         self.gust_extra_states = [0.0, 0.0, 0.0]  # fractal layers (tau/2, /4, /8)
         self.q_drift_state = 0.0
 
@@ -234,7 +235,12 @@ class WindOrgan:
             gust_mod = 1.0 + max(-0.95, min(0.95, gust_mod - 1.0))
         else:
             gust_mod = 1.0
-        amp_eff = amp * gust_mod if p.use_gust else amp
+        # The level and the gust change once per block. Ramp the wind level
+        # across the block, so it glides instead of stepping ~94 times a second.
+        amp_target = amp * gust_mod if p.use_gust else amp
+        amp_prev = amp_target if self.amp_prev is None else self.amp_prev
+        self.amp_prev = amp_target
+        amp_eff = np.linspace(amp_prev, amp_target, frames)[:, None]   # (frames, 1)
 
         if p.q_drift_depth > 0.0:
             q_alpha = 1.0 - math.exp(-(frames / sr) / max(p.q_drift_tau_s, 0.05))
