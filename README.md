@@ -23,6 +23,7 @@ The `play` extra adds `sounddevice`, which the command line player needs. The en
 .venv/bin/python -m wind_organ --render out.wav --seconds 30 --seed 1
 .venv/bin/python -m wind_organ --preset preset.json # load knob values from a JSON file
 .venv/bin/python -m wind_organ --preset presets/chords_in_wind.json --chords piece --floor 0.4
+.venv/bin/python -m wind_organ --preset presets/cave.json --floor 0.4   # wind that finds a pipe
 .venv/bin/python -m wind_organ --list               # list the audio devices
 ```
 
@@ -43,6 +44,8 @@ In the keyboard UI:
 | `c` | Chord autoplay on / off (the chords of the piece, see below). Off = back to the single note |
 | `r` | Ranks per pipe: 1, 2, 3 |
 | `n` `N` | Wind chord level down / up |
+| `x` `X` | `organ_organic` down / up: from a clean organ to wind that finds a pipe (see below) |
+| `v` | Edge whistles: 0, 1, 2, 3, 4 |
 | `w` | Save the knobs to the `--preset` file |
 | `q` | Quit |
 
@@ -106,6 +109,42 @@ With the default values, the engine gives the same sound as before.
 
 The preset file is plain JSON. The loader skips keys that it does not know, so a `preset.json` from the theremin of winds loads as it is.
 
+## A wind that finds a pipe
+
+`organ_organic` goes from a clean organ (0) to a natural accident (1): the wind blows into a crack of a cave or a ruin, and it sounds like an organ pipe. You can move it during the piece (`x` and `X` in the keyboard UI).
+
+On the way, the clean sine pipes get less clean:
+
+- Each partial moves slowly on its own, like a real pipe in moving air.
+- The air pressure decides how each pipe speaks. The pressure is the organ swell times the gust. With weak air the fundamental is gone and the octave flickers. With a strong gust the pipe overblows to the octave. Each pipe speaks at a slightly different pressure.
+- The pitch shimmers a few cents, more while the pipe is unstable.
+- A pipe that starts to speak gives a short puff of noise (the chiff).
+
+At the same time, each sine pipe crossfades into a blown tube ([`wind_organ/tube.py`](wind_organ/tube.py)). The tube is a small physical model: an air column, a jet, and the wind noise always in the loop. With weak air it only rings: the wind resonates in the tube. With more air it catches and sings, in tune within about 10 cents. In big gusts it overblows. So at 1, the organ is made by the wind itself. When the air is weak, it is softer and breathier than the clean organ, as it should be.
+
+Four knobs make the wind itself more real. They are all off by default:
+
+| Knob | Try | What it does |
+|---|---|---|
+| `gust_bright` | 0.6 to 1 | A gust brightens the wind: the mid and high bands follow it more than the low rumble. |
+| `buffet_depth` | 0.3 to 0.5 | The fast flutter of real wind (`buffet_hz`, 12 Hz by default). All bands flap together. |
+| `gust_sweep_s` | 0.5 to 1 | A gust reaches one side first, the other side up to this many seconds later. The wind direction drifts slowly. |
+| `whistles` | 1 to 4 | Edge whistles: the wind on a wire or a crack. Each one has its own pitch, sings only above its own wind speed, and goes higher when the wind blows harder. `whistle_level`, `whistle_q`, `whistle_track` shape them. |
+
+Two presets use all of this:
+
+- [`presets/cave.json`](presets/cave.json): wind in a crack finds a low pipe and its fifth. Only blown tubes. Slow big gusts, a long dark room, one far whistle. The pipes breathe, catch and sing in turn.
+- [`presets/ruin.json`](presets/ruin.json): a storm in a ruin. Three pipes, mostly blown (`organ_organic` 0.7), driven by the wind. Bright gusts that sweep across, flutter, three whistles.
+
+```bash
+.venv/bin/python -m wind_organ --preset presets/cave.json --floor 0.4
+.venv/bin/python -m wind_organ --preset presets/ruin.json --floor 0.4
+# the chords of the piece, played by blown tubes
+.venv/bin/python -m wind_organ --preset presets/ruin.json --chords piece --floor 0.4
+```
+
+With all these knobs at 0, the engine gives the same sound as before. Only two small changes are always on: the wind level and the organ level and pitch now glide inside each block instead of moving in steps.
+
 ## Use it as a library
 
 ```python
@@ -142,12 +181,13 @@ uv pip install --python .venv/bin/python -e ../wind-organ
 1. Pink noise is the raw material. It has more energy in the lows than white noise, so it sounds darker and fuller.
 2. Three bandpass filters shape it. A low band gives a fixed rumble (about 110 Hz). A mid band follows the pitch. A high whistle (about 3.2 kHz) comes in at high pitch.
 3. The level sets the loudness. The `storm` knob also lets it change the character: a soft level gives a muffled breeze, a loud level gives a bright, gusty storm.
-4. A slow random LFO (low-frequency oscillator, a slow control signal) swells the level. These are the gusts. With `gust_layers` above 1, faster gust layers add turbulence.
+4. A slow random LFO (low-frequency oscillator, a slow control signal) swells the level. These are the gusts. With `gust_layers` above 1, faster gust layers add turbulence. A gust can also brighten the wind (`gust_bright`) and reach one side first (`gust_sweep_s`). The buffet adds a fast flutter on top (`buffet_depth`).
 5. The bourdon adds narrow whistles at the pitch, the fifth and the third. It sounds like air across a bottle. The wind chord does the same at the notes of `organ_chord`.
-6. The organ adds a pipe drone: sine partials at the harmonics of a deep note, plus noise that rings at the same harmonics (the air in the tube). The same gusts swell, brighten and sharpen it. It only builds after the level stays high for some seconds (or it stays on, with `organ_follow` at 0). With `organ_chord` it plays several pipes, each one as detuned ranks spread in stereo.
-7. A `tanh` stage saturates the mix (`drive`).
-8. A stereo reverb (a 16-line feedback delay network) adds a stone room.
-9. A subsonic high-pass filter and a limiter protect the speakers.
+6. The edge whistles (`whistles`) are narrow bandpasses on the same noise that come in only in strong wind, and rise with it.
+7. The organ adds a pipe drone: sine partials at the harmonics of a deep note, plus noise that rings at the same harmonics (the air in the tube). The same gusts swell, brighten and sharpen it. It only builds after the level stays high for some seconds (or it stays on, with `organ_follow` at 0). With `organ_chord` it plays several pipes, each one as detuned ranks spread in stereo. `organ_organic` makes the pipes less clean and crossfades them into blown tubes.
+8. A `tanh` stage saturates the mix (`drive`).
+9. A stereo reverb (a 16-line feedback delay network) adds a stone room.
+10. A subsonic high-pass filter and a limiter protect the speakers.
 
 All knobs, with their defaults and a short comment, are in [`wind_organ/params.py`](wind_organ/params.py).
 

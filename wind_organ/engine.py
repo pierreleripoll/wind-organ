@@ -4,10 +4,12 @@ Signal flow per block:
     pink noise (Paul Kellet 6-pole IIR), two decorrelated columns (L/R) ->
         either three parallel RBJ bandpass biquads with per-band gains (the
         "spectral tilt") or one bandpass + one lowpass (single-band)
-    -> multiply by level x gust LFO
+    -> multiply by level x gust LFO (+ optional buffet flutter, gust sweep L/R)
     -> optional bourdon voices (narrow bandpass at root + 5th + 3rd)
     -> optional wind chord (narrow bandpasses at the organ_chord notes)
-    -> optional organ drone (additive pipe partials + pitched breath)
+    -> optional edge whistles (bandpasses that sing only in strong wind)
+    -> optional organ drone (additive pipe partials + pitched breath; with
+       organ_organic, less clean partials and blown tubes, see tube.py)
     -> tanh saturation (drive)                                   = voice()
     -> stereo FDN reverb, wind_gain                              = room()
     -> subsonic high-pass + brick-wall limiter (speaker safety)  = protect()
