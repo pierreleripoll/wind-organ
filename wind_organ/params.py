@@ -43,6 +43,9 @@ class Params:
     # A gust brightens the wind: the mid and high bands follow it more than the
     # low rumble (faster air = more hiss). 0 = all bands follow the gust the same.
     gust_bright: float = 0.0
+    # A gust reaches one side first: the other side gets it up to gust_sweep_s
+    # later. The wind direction drifts slowly. 0 = both sides gust together.
+    gust_sweep_s: float = 0.0
     # Buffet: the fast flutter of real wind on the level (the flapping you hear
     # in a recording). Noise at about buffet_hz, deeper in a storm. 0 = off.
     buffet_depth: float = 0.0

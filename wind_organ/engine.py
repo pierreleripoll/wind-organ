@@ -62,6 +62,8 @@ STORM_SOFT_BODY = 0.25      # very soft -> up to +25% low-band body (rounded)
 GUST_BRIGHT_MID = 1.5
 GUST_BRIGHT_HIGH = 3.0
 STORM_BUFFET = 1.0          # loud -> up to +100% buffet depth
+GUST_SWEEP_MAX_S = 2.0      # longest gust_sweep_s
+GUST_SWEEP_DIR_TAU = 10.0   # correlation time of the wind direction (s)
 
 # Pipe organ "principal chorus": harmonic multiples of the root and their raw
 # levels (8' 4' 2-2/3' 2' 1-3/5' 1-1/3' 1'). The 7th harmonic is off by default
@@ -148,6 +150,9 @@ class WindOrgan:
         self.buffet_hz = 0.0  # cutoff of the filter below (0 = not built yet)
         self.buffet_b = self.buffet_a = self.buffet_norm = None
         self.buffet_zi = np.zeros((2, 2))
+        self.gust_hist = None  # gust_sweep: the gust of the last blocks (a ring)
+        self.gust_hist_pos = 0
+        self.gust_dir_state = 0.0
         self.gust_extra_states = [0.0, 0.0, 0.0]  # fractal layers (tau/2, /4, /8)
         self.q_drift_state = 0.0
 
@@ -183,11 +188,14 @@ class WindOrgan:
         return butter(SUBSONIC_HP_ORDER, max(5.0, min(fc, self.sr * 0.45)) / (self.sr / 2.0),
                       btype="high", output="sos")
 
-    def _lfo_step(self, prev: float, alpha: float, depth: float) -> tuple[float, float]:
+    def _lfo_step(self, prev: float, alpha: float, depth: float,
+                  rng: np.random.Generator | None = None) -> tuple[float, float]:
         """One block of a unit-variance random-walk LFO. Returns (new_state, mod)
         where mod is in [1-depth, 1+depth]. The norm rescales because a one-pole on
-        unit-variance noise has stationary stddev sqrt(alpha/(2-alpha))."""
-        new_state = (1.0 - alpha) * prev + alpha * self.rng.standard_normal()
+        unit-variance noise has stationary stddev sqrt(alpha/(2-alpha)). rng: the
+        generator to draw from (default: the wind's own)."""
+        rng = self.rng if rng is None else rng
+        new_state = (1.0 - alpha) * prev + alpha * rng.standard_normal()
         norm = math.sqrt((2.0 - alpha) / alpha)
         return new_state, 1.0 + depth * math.tanh(new_state * norm * 0.7)
 
@@ -248,10 +256,15 @@ class WindOrgan:
             gust_mod = 1.0
         # The level and the gust change once per block. Ramp the wind level
         # across the block, so it glides instead of stepping ~94 times a second.
-        amp_target = amp * gust_mod if p.use_gust else amp
+        if p.use_gust and p.gust_sweep_s > 0.0:
+            amp_target = amp * self._gust_sweep(frames, gust_mod, p)    # (2,): left, right
+        else:
+            amp_target = amp * gust_mod if p.use_gust else amp
         amp_prev = amp_target if self.amp_prev is None else self.amp_prev
         self.amp_prev = amp_target
-        amp_eff = np.linspace(amp_prev, amp_target, frames)[:, None]   # (frames, 1)
+        amp_eff = np.linspace(amp_prev, amp_target, frames)   # (frames,) or (frames, 2)
+        if amp_eff.ndim == 1:
+            amp_eff = amp_eff[:, None]
         if p.buffet_depth > 0.0:
             amp_eff = amp_eff * self._buffet(frames, m, p)               # (frames, 2)
 
@@ -356,6 +369,29 @@ class WindOrgan:
         for k in keys:
             mix = mix + comp[k]
         return np.tanh(mix * drive_eff)
+
+    def _gust_sweep(self, frames: int, gust_mod: float, p: Params) -> np.ndarray:
+        """The gust for the left and the right side, (2,). A gust reaches one side
+        first: the other side gets the gust of up to gust_sweep_s ago. The wind
+        direction drifts slowly, so the sweep changes side and length, and with
+        the wind from the front both sides get the same gust."""
+        sr = self.sr
+        n = int(math.ceil(GUST_SWEEP_MAX_S * sr / frames)) + 2
+        if self.gust_hist is None or len(self.gust_hist) != n:
+            self.gust_hist = np.full(n, gust_mod)   # first block, or a new block size
+            self.gust_hist_pos = 0
+        pos = (self.gust_hist_pos + 1) % n
+        self.gust_hist[pos] = gust_mod
+        self.gust_hist_pos = pos
+        alpha = 1.0 - math.exp(-(frames / sr) / GUST_SWEEP_DIR_TAU)
+        self.gust_dir_state, d = self._lfo_step(self.gust_dir_state, alpha, 1.0, self.wind_rng)
+        direction = d - 1.0   # -1..1: -1 = from the right, 0 = from the front, 1 = from the left
+        delay = min(GUST_SWEEP_MAX_S, p.gust_sweep_s) * abs(direction) * sr / frames  # blocks
+        k = int(delay)
+        a = self.gust_hist[(pos - k) % n]
+        b = self.gust_hist[(pos - k - 1) % n]
+        late = a + (b - a) * (delay - k)
+        return np.array([gust_mod, late]) if direction >= 0.0 else np.array([late, gust_mod])
 
     def _buffet(self, frames: int, m: float, p: Params) -> np.ndarray:
         """The fast flutter of real wind on the level: noise lowpassed at
