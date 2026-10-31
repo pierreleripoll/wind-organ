@@ -142,7 +142,7 @@ Four knobs make the wind itself more real. They are all off by default:
 
 Two presets use all of this:
 
-- [`presets/cave.json`](presets/cave.json): wind in a crack finds a low pipe and its fifth. Only blown tubes, bent into a crack (`organ_cavity` 1): hollow tones, and a big gust jumps to a ninth. Slow big gusts, a long dark room, one far whistle. The pipes breathe, catch and sing in turn.
+- [`presets/cave.json`](presets/cave.json): wind in a crack finds a low pipe and its fifth. Only blown tubes, bent into a crack (`organ_cavity` 1): hollow tones, and a big gust jumps to a ninth. Slow big gusts, one far whistle, and the echo of a real cave (`reverb_ir` is `es_culleram`). `--ir none` gives back the long dark built room. The pipes breathe, catch and sing in turn.
 - [`presets/ruin.json`](presets/ruin.json): a storm in a ruin. Three pipes, mostly blown (`organ_organic` 0.7) and a bit crooked (`organ_cavity` 0.3), driven by the wind. Bright gusts that sweep across, flutter, three whistles.
 
 ```bash

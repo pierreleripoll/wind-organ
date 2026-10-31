@@ -33,5 +33,6 @@
   "reverb_mix": 0.5,
   "reverb_room": 0.95,
   "reverb_damping": 0.75,
-  "reverb_bass": 0.6
+  "reverb_bass": 0.6,
+  "reverb_ir": "es_culleram"
 }
