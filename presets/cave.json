@@ -4,6 +4,7 @@
   "organ_note": 43.0,
   "organ_chord": "1 3/2",
   "organ_organic": 1.0,
+  "organ_cavity": 1.0,
   "organ_follow": 0.5,
   "organ_threshold": 0.0,
   "organ_wind": 1.0,
