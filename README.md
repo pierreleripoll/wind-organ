@@ -120,7 +120,13 @@ On the way, the clean sine pipes get less clean:
 - The pitch shimmers a few cents, more while the pipe is unstable.
 - A pipe that starts to speak gives a short puff of noise (the chiff).
 
-At the same time, each sine pipe crossfades into a blown tube ([`wind_organ/tube.py`](wind_organ/tube.py)). The tube is a small physical model: an air column, a jet, and the wind noise always in the loop. With weak air it only rings: the wind resonates in the tube. With more air it catches and sings, in tune within about 10 cents. In big gusts it overblows. So at 1, the organ is made by the wind itself. When the air is weak, it is softer and breathier than the clean organ, as it should be.
+At the same time, each sine pipe crossfades into a blown tube ([`wind_organ/tube.py`](wind_organ/tube.py)). The tube is a small physical model of a flue pipe: an air column, and a jet of air that hits an edge. The jet needs time to cross the mouth, and the pressure sets this time. So the pressure picks the note by itself, with no rule written by hand:
+
+- With weak air the tube only breathes. Just before it catches, it can whisper the octave.
+- With normal air it sings, in tune within about 10 cents. It goes a bit sharp when the air pushes harder, like a real flute. Low pipes are slow to speak.
+- In a big gust it jumps to the octave. It stays there until the gust is well gone.
+
+Its tone is mostly odd harmonics, like a stopped organ pipe (a bourdon). The wind noise shakes the jet all the time, so the tone breathes. So at 1, the organ is made by the wind itself.
 
 Four knobs make the wind itself more real. They are all off by default:
 

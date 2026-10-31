@@ -584,8 +584,6 @@ class WindOrgan:
         # The tone is centred unless organ_spread; the breath is the stereo noise.
         if organic > 0.0 and p.organ_air > 0.0:
             air = air * (1.0 + organic * AIR_HESITATE * (1.0 - _smooth01((pressure - SPEAK_LO) / SPEAK_W)))
-            # The tubes breathe by themselves: this breath fades out with the sines.
-            air = air * math.cos(organic * math.pi / 2.0)
         return (tone * ORGAN_GAIN + air * AIR_BOOST * p.organ_air) * ramp
 
     @staticmethod
@@ -778,13 +776,13 @@ class WindOrgan:
 
             if blown:
                 # The same pipe, blown: its tube gets the pipe's pressure (swell,
-                # gust, its own fade) and overblows with it.
+                # gust, its own fade). The pressure picks its mode (tube.py).
                 if pipe.tube is None:
                     pipe.tube = Tube(sr, ranks, self.organic_rng)
                 pipe.tube.set_ranks(ranks)
                 tp0 = pipe.pressure if pipe.tube_pressure is None else pipe.tube_pressure
                 pipe.tube_pressure = pipe.pressure
-                y = pipe.tube.process(f_now + offs, tp0, pipe.pressure, src, 1.0 + pipe.over)
+                y = pipe.tube.process(f_now + offs, tp0, pipe.pressure, src)
                 gt = g * w_tube * TUBE_LEVEL
                 tube_out[:, 0] += gl @ y * gt
                 tube_out[:, 1] += gr @ y * gt
