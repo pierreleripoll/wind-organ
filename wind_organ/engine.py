@@ -135,7 +135,7 @@ CHIFF_GAIN = 20.0          # a bandpass on pink noise has a low RMS
 CHIFF_HYST = 0.1           # the pressure must go this far over SPEAK_LO to fire
 CHIFF_MIN = 1e-3           # below this the chiff is over
 TUBE_LEVEL = 1.0           # blown tube level next to the sine pipe
-TUBE_F_MAX = 2000.0        # pipes above this stay sines (Hz)
+TUBE_F_MAX = 3000.0        # pipes above this stay sines (Hz)
 # Wind chord: the wind noise rings at the chord notes. A narrow bandpass on noise
 # has a low RMS, so it gets a boost that grows with Q (bandwidth ~ f / Q).
 WIND_CHORD_BOOST = 1.6
@@ -742,8 +742,8 @@ class WindOrgan:
             g = np.linspace(g0, g1, frames)
             g = g * g * (3.0 - 2.0 * g) * norm   # smoothstep: soft start and end of a fade
 
-            # A very high pipe keeps its sine: a tube up there costs a lot of CPU
-            # (a very short delay) and would only add hiss.
+            # A very high pipe keeps its sine: up there the tube column is only a
+            # few samples long, so the tube gets weak and out of tune.
             blown = tubes and f < TUBE_F_MAX
             if sines or not blown:
                 mults = ORGAN_MULTS[keep]
