@@ -18,6 +18,7 @@ import numpy as np
 
 from .chords import ChordPlayer
 from .controls import Smoother, Wanderer
+from .convolver import find_ir
 from .engine import SR, WindOrgan, pitch_to_freq
 from .params import Params
 
@@ -231,6 +232,9 @@ def main(argv=None) -> None:
     ap.add_argument("--cue", action="store_true",
                     help="start with the wind only: d brings the organ note in, "
                          "c starts the chords (keyboard UI)")
+    ap.add_argument("--ir", metavar="WAV",
+                    help="reverb in a real space: an impulse response (a WAV path, or a "
+                         "file name of wind_organ/irs/). 'none' = the built room")
     ap.add_argument("--no-tui", action="store_true", help="no keyboard UI, autoplay only")
     ap.add_argument("--render", metavar="WAV", help="render offline to a WAV file (autoplay)")
     ap.add_argument("--seconds", type=float, default=30.0, help="length for --render")
@@ -245,6 +249,13 @@ def main(argv=None) -> None:
         return
 
     params = Params.load(args.preset) if args.preset else Params()
+    if args.ir:
+        params.reverb_ir = "" if args.ir == "none" else args.ir
+    if params.reverb_ir:
+        try:
+            find_ir(params.reverb_ir)
+        except FileNotFoundError as e:
+            ap.error(str(e))
     if args.organ or args.hold is not None:
         params.organ_mode = True
     if args.hold is not None:

@@ -24,11 +24,78 @@ The Convolver is linear and does not change in time, like the FDN: a held note
 comes out as the same note plus the echoes of the space.
 """
 import math
+from functools import lru_cache
+from pathlib import Path
 
 import numba
 import numpy as np
+from scipy.io import wavfile
+from scipy.signal import resample_poly
 
 PART = 512  # samples per IR part. Bigger = less CPU, but more delay with odd blocks
+
+IR_DIR = Path(__file__).parent / "irs"   # the IRs that come with the engine
+# The direct sound (the click itself, before any echo) is already in the dry
+# signal, so it is cut: silent up to DIRECT_MS[0] after the peak, back to full at
+# DIRECT_MS[1]. The echoes that come after it stay as they are.
+DIRECT_MS = (0.5, 1.5)
+FADE_OUT_S = 0.1          # fade the end of the IR, so a cut recording does not click
+# Level of the IR: on pink noise (50 Hz..12 kHz, close to the wind and the organ),
+# the wet is as loud as the FDN wet (reverb.py) at the default reverb_room. So
+# reverb_mix means the same with both.
+PINK_GAIN = 1.46
+PINK_BAND = (50.0, 12000.0)
+
+
+def find_ir(name: str) -> Path:
+    """A path as given, or else a file of the irs/ folder ("cave.wav" or "cave")."""
+    path = Path(name).expanduser()
+    if path.is_file():
+        return path
+    for cand in (IR_DIR / name, IR_DIR / f"{name}.wav"):
+        if cand.is_file():
+            return cand
+    raise FileNotFoundError(f"no impulse response {name!r} (not a file, not in {IR_DIR})")
+
+
+@lru_cache(maxsize=8)
+def load_ir(name: str, sr: int) -> np.ndarray:
+    """Read an IR (a mono or stereo WAV) and make it ready: (frames, 2), at sr.
+
+    It starts at the direct sound (the silence before it is cut), without the
+    direct sound itself, and with the level PINK_GAIN.
+    """
+    file_sr, data = wavfile.read(find_ir(name))
+    if data.dtype.kind in "iu":
+        info = np.iinfo(data.dtype)
+        data = (data.astype(np.float64) - (info.max + info.min + 1) / 2) / (info.max + 1)
+    data = np.asarray(data, dtype=np.float64)
+    if data.ndim == 1:
+        data = data[:, None]
+    if data.shape[1] == 1:
+        data = np.repeat(data, 2, axis=1)
+    elif data.shape[1] != 2:
+        raise ValueError(f"{name}: {data.shape[1]} channels, the IR must be mono or stereo")
+    if file_sr != sr:
+        g = math.gcd(int(file_sr), int(sr))
+        data = resample_poly(data, sr // g, file_sr // g, axis=0)
+    peak = int(np.argmax((data ** 2).sum(axis=1)))
+    ir = data[peak:].copy()
+    a, b = (int(round(ms * 1e-3 * sr)) for ms in DIRECT_MS)
+    fade = np.zeros(b)
+    fade[a:] = 0.5 - 0.5 * np.cos(np.pi * np.arange(b - a) / (b - a))
+    ir[:b] *= fade[:len(ir), None]
+    n_out = min(len(ir), int(FADE_OUT_S * sr))
+    ir[len(ir) - n_out:] *= np.cos(0.5 * np.pi * np.arange(n_out) / n_out)[:, None]
+    # Gain on pink noise, from the spectrum: the power of each frequency, weighted
+    # by 1/f like pink noise, over the band, for each channel.
+    n_fft = 1 << (2 * len(ir) - 1).bit_length()
+    f = np.fft.rfftfreq(n_fft, 1.0 / sr)
+    band = (f >= PINK_BAND[0]) & (f <= PINK_BAND[1])
+    power = np.abs(np.fft.rfft(ir, n=n_fft, axis=0)[band]) ** 2
+    w = 1.0 / f[band]
+    gain = math.sqrt(float(np.mean((power * w[:, None]).sum(axis=0) / w.sum())))
+    return ir * (PINK_GAIN / gain)
 
 
 @numba.njit("void(complex64[:, ::1], complex64[:, :, ::1], int64, complex64[:, ::1])",
@@ -138,6 +205,25 @@ if __name__ == "__main__":
         ok &= good
         print(f"block {block:4d}: delay {lag:3d} samples, error {err:6.1f} dB"
               f" {'ok' if good else 'BAD'}")
+
+    # load_ir: a 44.1 kHz int16 stereo file -> 48 kHz, cut before the direct
+    # sound, no direct sound, at the pink level.
+    import tempfile
+    sr_file = 44100
+    t = np.arange(int(1.2 * sr_file))
+    fake = rng.standard_normal((t.size, 2)) * np.exp(-t / (0.2 * sr_file))[:, None] * 0.05
+    fake[:2205] = 0.0                     # 50 ms of silence before the click
+    fake[2205] = 0.9                      # the direct sound
+    with tempfile.TemporaryDirectory() as tmp:
+        path = f"{tmp}/fake.wav"
+        wavfile.write(path, sr_file, (fake * 32767).astype(np.int16))
+        loaded = load_ir(path, SR)
+    n_want = int(round((t.size - 2205) * SR / sr_file))
+    direct = np.abs(loaded[:int(0.5e-3 * SR)]).max()
+    good = abs(loaded.shape[0] - n_want) < 10 and direct == 0.0 and loaded.shape[1] == 2
+    ok &= good
+    print(f"load_ir: {loaded.shape[0]} frames (want ~{n_want}), direct sound {direct:.1e}"
+          f" {'ok' if good else 'BAD'}")
 
     for secs in (3.0, 6.0, 10.0):
         cv = Convolver(rng.standard_normal((int(secs * SR), 2)) * 0.01)

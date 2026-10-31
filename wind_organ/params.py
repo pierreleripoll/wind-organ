@@ -142,6 +142,11 @@ class Params:
     reverb_room: float = 0.7       # 0 = small room, 1 = long cathedral
     reverb_damping: float = 0.5    # 0 = bright tail, 1 = dark tail
     reverb_bass: float = 0.0       # lows ring longer (warm stone room). 0 = neutral
+    # A real space instead of the built room: an impulse response (a mono or
+    # stereo WAV), as a path or as a file name of wind_organ/irs/. "" = the built
+    # room. With an IR, reverb_mix still sets the level, and reverb_room,
+    # reverb_damping and reverb_bass do nothing (the space is what it is).
+    reverb_ir: str = ""
     wind_gain: float = 1.0         # master gain after the reverb
     # Speaker protection: a 24 dB/oct high-pass that removes the sub-bass you
     # can't hear but that shakes the woofer. The wind body sits at ~110 Hz.

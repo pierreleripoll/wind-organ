@@ -11,7 +11,7 @@ Signal flow per block:
     -> optional organ drone (additive pipe partials + pitched breath; with
        organ_organic, less clean partials and blown tubes, see tube.py)
     -> tanh saturation (drive)                                   = voice()
-    -> stereo FDN reverb, wind_gain                              = room()
+    -> stereo FDN reverb (or a real space, reverb_ir), wind_gain = room()
     -> subsonic high-pass + brick-wall limiter (speaker safety)  = protect()
 
 The host gives two controls per block: a pitch in Hz (FREQ_LO..FREQ_HI, see
@@ -36,6 +36,7 @@ import numpy as np
 from scipy.signal import butter, iirfilter, lfilter, sosfilt
 
 from .chords import parse_chord
+from .convolver import Convolver, load_ir
 from .params import Params
 from .reverb import StereoReverb
 from .tube import Tube
@@ -181,6 +182,10 @@ class WindOrgan:
         self.sr = sr
         self.rng = np.random.default_rng(seed)
         self.reverb = StereoReverb(sr)
+        # The convolution reverb (reverb_ir), built when an IR is first asked for.
+        self.ir_name = ""
+        self.ir_conv = None
+        self.ir_error = ""  # why the IR could not be read ("" = no problem)
 
         # All filter states carry two columns (left/right noise), filtered on axis 0.
         self.pink_zis = [np.zeros((1, 2)) for _ in PINK_POLES]
@@ -816,13 +821,31 @@ class WindOrgan:
     def room(self, sat: np.ndarray, p: Params) -> np.ndarray:
         """Reverb (wet/dry crossfade) then wind_gain. No clipping here."""
         if p.reverb_mix > 0.0:
-            wet = self.reverb.process(sat, p.reverb_room, p.reverb_damping, p.reverb_bass)
+            wet = self._ir_wet(sat, p.reverb_ir) if p.reverb_ir else None
+            if wet is None:
+                wet = self.reverb.process(sat, p.reverb_room, p.reverb_damping, p.reverb_bass)
             out = sat * (1.0 - p.reverb_mix) + wet * p.reverb_mix
         else:
             out = sat
         if p.wind_gain != 1.0:
             out = out * p.wind_gain
         return out
+
+    def _ir_wet(self, sat: np.ndarray, name: str) -> np.ndarray | None:
+        """The wet signal of the impulse response `name`, or None if it can't be
+        read (then the built room plays, and `ir_error` says why). The IR is read
+        when the name changes, so the first block after a change takes longer."""
+        if name != self.ir_name:
+            self.ir_name = name
+            try:
+                self.ir_conv = Convolver(load_ir(name, self.sr))
+                self.ir_error = ""
+            except (OSError, ValueError) as e:
+                self.ir_conv = None
+                self.ir_error = str(e)
+        if self.ir_conv is None:
+            return None
+        return self.ir_conv.process((sat[:, 0] + sat[:, 1]) * 0.5)
 
     def protect(self, out: np.ndarray, p: Params) -> np.ndarray:
         """Speaker protection on the final bus: strip the inaudible sub that

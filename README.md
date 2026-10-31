@@ -154,6 +154,20 @@ Two presets use all of this:
 
 With all these knobs at 0, the engine gives the same sound as before. Only two small changes are always on: the wind level and the organ level and pitch now glide inside each block instead of moving in steps.
 
+## A real space
+
+`reverb_ir` replaces the built room with a real space. You give it an impulse response (IR): the recording of one click in a cave, a church or a mine. The IR holds all the echoes of that space. The engine plays the sound through it (a convolution, see [`wind_organ/convolver.py`](wind_organ/convolver.py)).
+
+```bash
+.venv/bin/python -m wind_organ --preset presets/cave.json --floor 0.4 --ir ~/irs/my_cave.wav
+```
+
+- The IR is a mono or stereo WAV, at any sample rate. Give a path, or the name of a file in `wind_organ/irs/`. In a preset, it is the `reverb_ir` key. `--ir none` goes back to the built room.
+- The engine cuts the silence and the direct sound (the click itself) at the start of the IR. It sets the level so that `reverb_mix` sounds about as loud as with the built room.
+- With an IR, `reverb_room`, `reverb_damping` and `reverb_bass` do nothing. The space is what it is.
+- It costs about 0.15 ms per block for a 6 s stereo IR. It adds no delay with blocks of 512 samples.
+- When `reverb_ir` changes, the engine reads the file in the audio thread. So the block after a change can click.
+
 ## Use it as a library
 
 ```python
@@ -195,7 +209,7 @@ uv pip install --python .venv/bin/python -e ../wind-organ
 6. The edge whistles (`whistles`) are narrow bandpasses on the same noise that come in only in strong wind, and rise with it.
 7. The organ adds a pipe drone: sine partials at the harmonics of a deep note, plus noise that rings at the same harmonics (the air in the tube). The same gusts swell, brighten and sharpen it. It only builds after the level stays high for some seconds (or it stays on, with `organ_follow` at 0). With `organ_chord` it plays several pipes, each one as detuned ranks spread in stereo. `organ_organic` makes the pipes less clean and crossfades them into blown tubes.
 8. A `tanh` stage saturates the mix (`drive`).
-9. A stereo reverb (a 16-line feedback delay network) adds a stone room.
+9. A stereo reverb (a 16-line feedback delay network) adds a stone room. With `reverb_ir`, a real space replaces it.
 10. A subsonic high-pass filter and a limiter protect the speakers.
 
 All knobs, with their defaults and a short comment, are in [`wind_organ/params.py`](wind_organ/params.py).
