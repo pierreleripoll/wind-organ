@@ -3,7 +3,7 @@ name = "wind-organ"
 version = "0.1.0"
 description = "Real-time wind and pipe-organ synth engine: pink noise, gusts, an organ drone the wind blows through."
 readme = "README.md"
-license = "MIT"
+license = "MIT AND CC-BY-NC-SA-4.0"  # the code is MIT, wind_organ/irs/es_culleram.wav is CC BY-NC-SA
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=2.0",

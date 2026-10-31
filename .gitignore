@@ -4,3 +4,4 @@ __pycache__/
 .venv/
 *.wav
 .claude/
+!wind_organ/irs/*.wav

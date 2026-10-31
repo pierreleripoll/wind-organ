@@ -159,7 +159,7 @@ With all these knobs at 0, the engine gives the same sound as before. Only two s
 `reverb_ir` replaces the built room with a real space. You give it an impulse response (IR): the recording of one click in a cave, a church or a mine. The IR holds all the echoes of that space. The engine plays the sound through it (a convolution, see [`wind_organ/convolver.py`](wind_organ/convolver.py)).
 
 ```bash
-.venv/bin/python -m wind_organ --preset presets/cave.json --floor 0.4 --ir ~/irs/my_cave.wav
+.venv/bin/python -m wind_organ --preset presets/cave.json --floor 0.4 --ir ~/irs/my_cave.wav   # any WAV
 ```
 
 - The IR is a mono or stereo WAV, at any sample rate. Give a path, or the name of a file in `wind_organ/irs/`. In a preset, it is the `reverb_ir` key. `--ir none` goes back to the built room.
@@ -167,6 +167,12 @@ With all these knobs at 0, the engine gives the same sound as before. Only two s
 - With an IR, `reverb_room`, `reverb_damping` and `reverb_bass` do nothing. The space is what it is.
 - It costs about 0.15 ms per block for a 6 s stereo IR. It adds no delay with blocks of 512 samples.
 - When `reverb_ir` changes, the engine reads the file in the audio thread. So the block after a change can click.
+
+One IR comes with the engine: `es_culleram`, a small Punic sanctuary cave in Ibiza (the sound dies in about 1 s). It is not under the MIT license: it is CC BY-NC-SA 4.0, so no commercial use. The credits are in [`wind_organ/irs/README.md`](wind_organ/irs/README.md).
+
+```bash
+.venv/bin/python -m wind_organ --preset presets/ruin.json --floor 0.4 --ir es_culleram
+```
 
 ## Use it as a library
 
@@ -216,4 +222,4 @@ All knobs, with their defaults and a short comment, are in [`wind_organ/params.p
 
 ## License
 
-MIT
+The code is MIT. The impulse responses in `wind_organ/irs/` keep their own licenses, see [`wind_organ/irs/README.md`](wind_organ/irs/README.md).
