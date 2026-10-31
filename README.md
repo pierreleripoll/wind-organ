@@ -11,7 +11,7 @@ uv venv .venv
 uv pip install --python .venv/bin/python -e '.[play]'
 ```
 
-The `play` extra adds `sounddevice`, which the command line player needs. The engine alone needs only `numpy` and `scipy`.
+The `play` extra adds `sounddevice`, which the command line player needs. The engine alone needs only `numpy`, `scipy` and `numba` (numba compiles the loop of the blown pipes, see `tube.py`).
 
 ## Play
 

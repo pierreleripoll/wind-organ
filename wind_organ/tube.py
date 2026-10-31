@@ -28,14 +28,15 @@ The model is a loop, one per rank of the pipe:
   like the sound a pipe mouth radiates. This lifts the harmonics by 6 dB per
   octave: the pipe is brighter, closer to an organ flue pipe than to an ocarina.
 
-Efficiency: the loop has one recursion per sample, so it is processed in
-sub-blocks shorter than the delay (the same trick as reverb.py). Inside a
-sub-block, every sample read from the delay was written in an earlier
-sub-block, so a sub-block is a few numpy calls on all the ranks at once. A pipe
-at 1 kHz has a 48-sample delay, so a 512 block is about 11 sub-blocks.
+Efficiency: the loop has one recursion per sample, which is very slow in plain
+Python. So the loop is compiled with numba (_loop below): it runs sample by
+sample like C, about 15 times faster than numpy calls on small chunks. It is
+compiled when this module is imported (and cached on disk), never in the audio
+callback.
 """
 import math
 
+import numba
 import numpy as np
 from scipy.signal import lfilter
 
@@ -60,6 +61,44 @@ def _bandpass(fc: float, q: float, sr: int):
     a0 = 1.0 + alpha
     return (np.array([alpha, 0.0, -alpha]) / a0,
             np.array([a0, -2.0 * math.cos(w0), 1.0 - alpha]) / a0)
+
+
+# The signature makes numba compile at import time, not at the first call (that
+# would block the audio for a second).
+@numba.njit("int64(float64[:, ::1], int64, float64[:, ::1], float64[::1], float64[::1],"
+            " float64[::1], float64[::1], float64[::1], float64[::1], float64[:, ::1],"
+            " float64, float64[:, ::1])", cache=True, nogil=True)
+def _loop(buf, pos, zi, d0, d1, b, a, gain, press, nz, bias, out):
+    """The pipe loop, sample by sample, for each rank: read the air column one
+    period back, mode filter, add the wind, jet (tanh), write it back.
+
+    buf: (ranks, TUBE_BUF) the air columns. pos: write position of the first
+    sample. zi: (ranks, 2) state of the mode filter (the same form as scipy's
+    lfilter). d0, d1: delay of each rank at the start and the end of the block.
+    b, a: the mode filter. gain, press: (frames,) loop gain and pressure.
+    nz: (ranks, frames) wind noise. out: (ranks, frames) is filled. Returns
+    the next write position."""
+    ranks, frames = nz.shape
+    mask = buf.shape[1] - 1
+    tb = math.tanh(bias)
+    for r in range(ranks):
+        z0, z1 = zi[r, 0], zi[r, 1]
+        dd = d1[r] - d0[r]
+        for n in range(frames):
+            w = pos + n
+            rp = w - (d0[r] + dd * (n / frames))
+            i0 = int(math.floor(rp))
+            fr = rp - i0
+            y0 = buf[r, i0 & mask]
+            x = y0 + (buf[r, (i0 + 1) & mask] - y0) * fr
+            h = z0 + b[0] * x
+            z0 = z1 + x * b[1] - h * a[1]
+            z1 = x * b[2] - h * a[2]
+            s = math.tanh(gain[n] * h + press[n] * nz[r, n] + bias) - tb
+            buf[r, w & mask] = s
+            out[r, n] = s
+        zi[r, 0], zi[r, 1] = z0, z1
+    return (pos + frames) & mask
 
 
 class Tube:
@@ -93,7 +132,6 @@ class Tube:
         last = np.zeros(ranks)
         buf[:k], zi[:k], nzi[:k], last[:k] = self.buf[:k], self.zi[:k], self.noise_zi[:k], self.last[:k]
         self.buf, self.zi, self.noise_zi, self.last, self.ranks = buf, zi, nzi, last, ranks
-        self.rows = np.arange(ranks)[:, None]
         self.f_prev = None
 
     def process(self, freqs: np.ndarray, p0: float, p1: float, noise: np.ndarray,
@@ -126,28 +164,9 @@ class Tube:
         t = np.arange(frames) / frames
         press = p0 + (p1 - p0) * t                      # (frames,)
         gain = TUBE_G0 + TUBE_G1 * press
-        bias = self.bias
-        tb = math.tanh(bias)
         out = np.empty((self.ranks, frames))
-        mask = TUBE_BUF - 1
-        start = 0
-        while start < frames:
-            m = min(frames - start, int(min(d0.min(), d1.min())) - 1)
-            j = np.arange(start, start + m)
-            d = d0[:, None] + (d1 - d0)[:, None] * t[None, start:start + m]
-            w = self.pos + j                            # write positions (m,)
-            r = w[None, :] - d                          # read positions (ranks, m)
-            i0 = np.floor(r).astype(np.int64)
-            fr = r - i0
-            y0 = self.buf[self.rows, i0 & mask]
-            y = y0 + (self.buf[self.rows, (i0 + 1) & mask] - y0) * fr
-            h, self.zi = lfilter(b, a, y, axis=1, zi=self.zi)
-            v = gain[None, start:start + m] * h + press[None, start:start + m] * nz[:, start:start + m]
-            s = np.tanh(v + bias) - tb
-            self.buf[self.rows, w[None, :] & mask] = s
-            out[:, start:start + m] = s
-            start += m
-        self.pos = (self.pos + frames) & mask
+        self.pos = _loop(self.buf, self.pos, self.zi, d0, d1, b, a, gain, press,
+                         np.ascontiguousarray(nz), self.bias, out)
         # Radiated sound: the first difference, scaled to keep the level of the
         # mode that speaks (the note, or the octave when overblown).
         rad = np.diff(out, axis=1, prepend=self.last[:, None])

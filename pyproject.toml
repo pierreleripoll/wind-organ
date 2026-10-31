@@ -8,6 +8,7 @@ requires-python = ">=3.10"
 dependencies = [
     "numpy>=2.0",
     "scipy>=1.13",
+    "numba>=0.60",  # compiles the sample loop of the blown tubes (tube.py)
 ]
 
 [project.optional-dependencies]
