@@ -132,6 +132,10 @@ class Params:
     # gust) decides how each pipe speaks: it hesitates on the octave when the
     # air is weak, it overblows in strong gusts.
     organ_organic: float = 0.0
+    # Bends the blown tubes into a crack in the rock (only with organ_organic >
+    # 0). 0 = a straight pipe. 1 = a cavity: the tone is purer, the breath rings
+    # at odd pitches, and a gust jumps to a ninth instead of the octave.
+    organ_cavity: float = 0.0
 
     # --- room and output ---
     reverb_mix: float = 0.25       # 0 = dry (reverb off, no CPU)

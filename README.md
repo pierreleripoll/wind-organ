@@ -45,6 +45,7 @@ In the keyboard UI:
 | `r` | Ranks per pipe: 1, 2, 3 |
 | `n` `N` | Wind chord level down / up |
 | `x` `X` | `organ_organic` down / up: from a clean organ to wind that finds a pipe (see below) |
+| `k` `K` | `organ_cavity` down / up: the blown tubes go from a straight pipe to a crack in the rock |
 | `v` | Edge whistles: 0, 1, 2, 3, 4 |
 | `w` | Save the knobs to the `--preset` file |
 | `q` | Quit |
@@ -127,6 +128,8 @@ At the same time, each sine pipe crossfades into a blown tube ([`wind_organ/tube
 - In a big gust it jumps to the octave. It stays there until the gust is well gone.
 
 Its tone is mostly odd harmonics, like a stopped organ pipe (a bourdon). The wind noise shakes the jet all the time, so the tone breathes. So at 1, the organ is made by the wind itself.
+
+`organ_cavity` (keys `k` and `K`) bends the tubes into a crack in the rock. A real cavity is not a straight pipe: the modes above the note are not harmonics. The note stays in tune, but the tone gets purer and hollower, like wind across a bottle. The breath rings at odd pitches. A gust jumps to a strange interval: at 1 it is near a ninth (2.25 times the note), not the octave. Each pipe bends a bit differently.
 
 Four knobs make the wind itself more real. They are all off by default:
 

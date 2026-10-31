@@ -40,9 +40,16 @@ one loop per rank of the pipe:
   even ones back.
 - The wind noise moves the jet and shakes the column all the time (turbulence
   at the mouth), so even the sung tone breathes and wavers, the way a real pipe
-  in moving air does. It is lowpassed at a few
-  harmonics of the note first: the breath of the pipe is a deep "hoo" around
-  the note. The broad hiss is already in the wind layer.
+  in moving air does. The noise is lowpassed at a few harmonics of the note
+  first: the breath of the pipe is a deep "hoo" around the note. The broad hiss
+  is already in the wind layer.
+- cavity (organ_cavity) bends the pipe into a crack in the rock. A few allpass
+  filters in the column delay the low frequencies more than the high ones
+  (dispersion). The note stays in tune and as strong, but the modes above it
+  move up: they are not harmonics any more. At cavity 1 the 2nd mode is near
+  2.25 times the note (a ninth), the 3rd near 3.9. So the tone gets purer and
+  hollower, the breath rings at odd pitches, and a gust jumps to a strange
+  interval instead of the octave. Each pipe bends a bit differently.
 - The sound out is the change of the air in the tube (its first difference),
   like the sound a pipe mouth radiates: it lifts the harmonics by 6 dB per
   octave. It is scaled to keep the level of the mode that speaks. To know this
@@ -79,26 +86,31 @@ TUBE_NOISE_HARM = 4.0     # the noise is lowpassed at this harmonic of the note
 TUBE_BIAS = (0.3, 0.5)    # offset of the jet (random per pipe)
 TUBE_OUT = 0.024          # output level
 TUBE_MODE_TAU = 0.05      # the output level follows a jump to the octave this fast (s)
+TUBE_CAVITY_STAGES = 4    # allpass filters in the column for organ_cavity
+TUBE_CAVITY_HARM = 2.0    # at cavity 1, they bend around this harmonic of the note
+TUBE_CAVITY_MAX = 1.2     # (more would leave too short a column for the high pipes)
 
 
 # The signature makes numba compile at import time, not at the first call (that
 # would block the audio for a second).
 @numba.njit("int64(float64[:, ::1], float64[:, ::1], float64[:, ::1], int64, float64[::1],"
             " float64[::1], float64[::1], float64[::1], float64[::1], float64[::1], float64,"
-            " float64, float64[:, ::1], float64, float64[:, ::1], float64[:, ::1])",
+            " float64, float64[:, ::1], float64, float64[:, ::1], float64[:, ::1], float64[::1])",
             cache=True, nogil=True)
-def _loop(buf, jbuf, st, pos, d0, d1, t0, t1, c, adc, p0, p1, nz, bias, out, corr):
+def _loop(buf, jbuf, st, pos, d0, d1, t0, t1, c, adc, p0, p1, nz, bias, out, corr, ap):
     """The pipe, sample by sample, for each rank.
 
     buf: (ranks, TUBE_BUF) the air column. jbuf: the same size, what the column
-    did at the mouth (the jet reads it late). st: (ranks, 3) filter states.
+    did at the mouth (the jet reads it late). st: (ranks, 3 + 2 *
+    TUBE_CAVITY_STAGES) filter states.
     pos: write position of the first sample. d0, d1: delay of the column at the
     start and the end of the block. t0, t1: the period, the same. c, adc: poles
     of the wall losses and of the DC blocker. p0, p1: pressure at the start and
     the end. nz: (ranks, frames) wind noise. out: (ranks, frames) is filled with
     the column at the mouth. corr: (ranks, 2) gets sum(s * s half a period
-    back) and sum(s * s), to see if the pipe overblows. Returns the next write
-    position."""
+    back) and sum(s * s), to see if the pipe overblows. ap: (ranks,) the
+    allpass coefficient of the cavity (0 = a straight pipe, no allpass).
+    Returns the next write position."""
     ranks, frames = nz.shape
     mask = buf.shape[1] - 1
     tb = math.tanh(bias)
@@ -121,6 +133,13 @@ def _loop(buf, jbuf, st, pos, d0, d1, t0, t1, c, adc, p0, p1, nz, bias, out, cor
             lp = (1.0 - cr) * yb + cr * lp
             y = lp - x1 + ar * y1
             x1, y1 = lp, y
+            if ap[r] != 0.0:
+                # The cavity: allpass filters (the high frequencies go round faster).
+                for m in range(TUBE_CAVITY_STAGES):
+                    j = 3 + 2 * m
+                    z = ap[r] * y + st[r, j] - ap[r] * st[r, j + 1]
+                    st[r, j], st[r, j + 1] = y, z
+                    y = z
             # The jet: what the mouth did one jet travel ago (shorter when the
             # pressure is higher), inverted, through the edge (tanh). Its speed
             # and its flow grow with the square root of the pressure.
@@ -148,14 +167,17 @@ def _loop(buf, jbuf, st, pos, d0, d1, t0, t1, c, adc, p0, p1, nz, bias, out, cor
     return (pos + frames) & mask
 
 
-def _loop_delay(f: np.ndarray, c: np.ndarray, adc: np.ndarray, sr: int) -> np.ndarray:
+def _loop_delay(f: np.ndarray, c: np.ndarray, adc: np.ndarray, ap: np.ndarray,
+                sr: int) -> np.ndarray:
     """Delay of the column (samples) for the notes f: one period (a bit longer,
-    see TUBE_TUNE_CENTS) minus the delay of the wall losses and the DC blocker
-    at the note, so the loop is in tune."""
+    see TUBE_TUNE_CENTS) minus the delay of the wall losses, the DC blocker and
+    the cavity allpasses at the note, so the loop is in tune."""
     w = 2.0 * np.pi * f / sr
     z = np.exp(-1j * w)
     h = (1.0 - c) / (1.0 - c * z) * (1.0 - z) / (1.0 - adc * z)
-    return sr / f * 2.0 ** (TUBE_TUNE_CENTS / 1200.0) + np.angle(h) / w
+    # Phase of one allpass (a + 1/z) / (1 + a/z); none when ap is 0.
+    ph_ap = np.where(ap != 0.0, -w + 2.0 * np.arctan(ap * np.sin(w) / (1.0 + ap * np.cos(w))), 0.0)
+    return sr / f * 2.0 ** (TUBE_TUNE_CENTS / 1200.0) + (np.angle(h) + TUBE_CAVITY_STAGES * ph_ap) / w
 
 
 class Tube:
@@ -169,10 +191,13 @@ class Tube:
         self.sr = sr
         self.rng = rng
         self.bias = rng.uniform(*TUBE_BIAS)   # each pipe (each crack) is a bit different
+        # How much this crack bends, 0.85..1.15 times organ_cavity. It comes
+        # from the bias, so the rng draws stay the same.
+        self.bend = 0.85 + 0.3 * (self.bias - TUBE_BIAS[0]) / (TUBE_BIAS[1] - TUBE_BIAS[0])
         self.ranks = 0
         self.buf = np.zeros((0, TUBE_BUF))
         self.jbuf = np.zeros((0, TUBE_BUF))
-        self.st = np.zeros((0, 3))
+        self.st = np.zeros((0, 3 + 2 * TUBE_CAVITY_STAGES))
         self.noise_zi = np.zeros((0, 1))
         self.last = np.zeros(0)   # last sample of each rank (for the radiated output)
         self.octave = np.zeros(0)  # 0 = on the note, 1 = overblown to the octave
@@ -194,7 +219,7 @@ class Tube:
 
         self.buf = resize(self.buf, (ranks, TUBE_BUF))
         self.jbuf = resize(self.jbuf, (ranks, TUBE_BUF))
-        self.st = resize(self.st, (ranks, 3))
+        self.st = resize(self.st, (ranks, 3 + 2 * TUBE_CAVITY_STAGES))
         self.noise_zi = resize(self.noise_zi, (ranks, 1))
         self.last = resize(self.last, (ranks,))
         self.octave = resize(self.octave, (ranks,))
@@ -202,10 +227,12 @@ class Tube:
         self.out_gain = None
         self.f_prev = None
 
-    def process(self, freqs: np.ndarray, p0: float, p1: float, noise: np.ndarray) -> np.ndarray:
+    def process(self, freqs: np.ndarray, p0: float, p1: float, noise: np.ndarray,
+                cavity: float = 0.0) -> np.ndarray:
         """freqs: (ranks,) frequency of each rank at the end of the block (it
         glides from the last block's). p0, p1: air pressure at the start and
-        the end of the block. noise: (frames, 2) wind noise. Returns (ranks, frames)."""
+        the end of the block. noise: (frames, 2) wind noise. cavity: 0 = a
+        straight pipe, 1 = a crack in the rock. Returns (ranks, frames)."""
         sr = self.sr
         frames = noise.shape[0]
         f1 = np.clip(np.asarray(freqs, dtype=np.float64), TUBE_F_MIN, sr * 0.45)
@@ -213,6 +240,8 @@ class Tube:
         self.f_prev = f1
         c = np.exp(-2.0 * np.pi * np.minimum(sr * 0.45, f1 * TUBE_LOSS_HARM) / sr)
         adc = np.exp(-2.0 * np.pi * f1 * TUBE_DC_HARM / sr)
+        bend = min(TUBE_CAVITY_MAX, max(0.0, cavity) * self.bend)
+        ap = -np.exp(-2.0 * np.pi * f1 * TUBE_CAVITY_HARM / (sr * bend)) if bend > 0.0 else np.zeros(self.ranks)
 
         # Each rank breathes its own blend of the left and right wind noise,
         # lowpassed around the first harmonics of the note.
@@ -225,8 +254,8 @@ class Tube:
         out = np.empty((self.ranks, frames))
         corr = np.zeros((self.ranks, 2))
         self.pos = _loop(self.buf, self.jbuf, self.st, self.pos,
-                         _loop_delay(f0, c, adc, sr), _loop_delay(f1, c, adc, sr),
-                         sr / f0, sr / f1, c, adc, float(p0), float(p1), nz, self.bias, out, corr)
+                         _loop_delay(f0, c, adc, ap, sr), _loop_delay(f1, c, adc, ap, sr),
+                         sr / f0, sr / f1, c, adc, float(p0), float(p1), nz, self.bias, out, corr, ap)
 
         # On the octave, the column looks the same half a period back.
         same = corr[:, 0] / (corr[:, 1] + 1e-12)

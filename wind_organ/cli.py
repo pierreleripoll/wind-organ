@@ -120,8 +120,8 @@ def tui(stdscr, player: Player, preset_path: str | None) -> None:
                 f"[{'x' if p.organ_mode and p.organ_gate > 0.0 else ' '}] drone (d)"
                 f"   [{'x' if player.chord_auto else ' '}] chord autoplay (c)   ranks (r)"
                 f"   wind chord {p.wind_chord:.2f} (n/N)",
-                f"organic {p.organ_organic:.1f} (x/X: clean organ .. wind in a pipe)"
-                f"   whistles {p.whistles} (v)",
+                f"organic {p.organ_organic:.1f} (x/X: clean .. wind)"
+                f"   cavity {p.organ_cavity:.1f} (k/K: pipe .. crack)   whistles {p.whistles} (v)",
                 "",
                 "left/right pitch   up/down level   [ ] held note"
                 + ("   w save preset" if preset_path else "") + "   q quit",
@@ -194,6 +194,10 @@ def tui(stdscr, player: Player, preset_path: str | None) -> None:
                 p.organ_organic = max(0.0, round(p.organ_organic - 0.1, 1))
             elif key == ord("X"):
                 p.organ_organic = min(1.0, round(p.organ_organic + 0.1, 1))
+            elif key == ord("k"):
+                p.organ_cavity = max(0.0, round(p.organ_cavity - 0.1, 1))
+            elif key == ord("K"):
+                p.organ_cavity = min(1.0, round(p.organ_cavity + 0.1, 1))
             elif key == ord("v"):
                 p.whistles = (p.whistles + 1) % 5
             elif key == ord("w") and preset_path:

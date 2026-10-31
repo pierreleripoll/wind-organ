@@ -782,7 +782,7 @@ class WindOrgan:
                 pipe.tube.set_ranks(ranks)
                 tp0 = pipe.pressure if pipe.tube_pressure is None else pipe.tube_pressure
                 pipe.tube_pressure = pipe.pressure
-                y = pipe.tube.process(f_now + offs, tp0, pipe.pressure, src)
+                y = pipe.tube.process(f_now + offs, tp0, pipe.pressure, src, p.organ_cavity)
                 gt = g * w_tube * TUBE_LEVEL
                 tube_out[:, 0] += gl @ y * gt
                 tube_out[:, 1] += gr @ y * gt
