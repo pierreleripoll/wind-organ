@@ -220,6 +220,18 @@ uv pip install --python .venv/bin/python -e ../wind-organ
 
 All knobs, with their defaults and a short comment, are in [`wind_organ/params.py`](wind_organ/params.py).
 
+## Check a change
+
+[`tools/regress.py`](tools/regress.py) renders seven seeded scenes (the wind, the organ, the chord presets, cave and ruin). It renders them with the code of a git revision and with your working tree, and compares them sample by sample. A new knob that is off by default must give `same` for every scene. The exit code is 1 when a scene changed.
+
+```bash
+.venv/bin/python tools/regress.py              # against HEAD
+.venv/bin/python tools/regress.py main~3       # against another revision
+.venv/bin/python tools/regress.py --wav out/   # also write the new renders, to listen
+```
+
+The self-tests of the DSP parts run with `.venv/bin/python -m wind_organ.tube` and `.venv/bin/python -m wind_organ.convolver`.
+
 ## License
 
 The code is MIT. The impulse responses in `wind_organ/irs/` keep their own licenses, see [`wind_organ/irs/README.md`](wind_organ/irs/README.md).
